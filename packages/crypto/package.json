@@ -1,0 +1,26 @@
+{
+  "name": "@password-manager/crypto",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Client-side cryptographic primitives (key derivation, vault encryption)",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "clean": "rm -rf dist *.tsbuildinfo"
+  },
+  "devDependencies": {
+    "@types/libsodium-wrappers-sumo": "^0.7.8",
+    "vitest": "^4.1.11"
+  },
+  "dependencies": {
+    "libsodium-wrappers-sumo": "^0.8.4"
+  },
+  "files": [
+    "dist"
+  ]
+}
