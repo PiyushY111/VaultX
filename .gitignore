@@ -1,0 +1,46 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+*.tsbuildinfo
+.vite/
+
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.local
+
+# Tests
+coverage/
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/
+
+# Packaged browser extension
+*.zip
+*.crx
+*.xpi
+web-ext-artifacts/
+
+# Logs and caches
+*.log
+npm-debug.log*
+.npm/
+.eslintcache
+.prettiercache
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Claude Code local (per-user) settings
+.claude/settings.local.json

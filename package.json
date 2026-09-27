@@ -1,0 +1,33 @@
+{
+  "name": "password-manager",
+  "version": "0.0.0",
+  "private": true,
+  "description": "VaultX: self-hosted, zero-knowledge password manager",
+  "workspaces": [
+    "packages/crypto",
+    "packages/server",
+    "packages/web",
+    "packages/extension"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -b packages/crypto packages/server packages/web packages/extension",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "clean": "npm run clean --workspaces --if-present"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^26.6.3",
+    "eslint": "^10.11.0",
+    "eslint-config-prettier": "^10.1.8",
+    "prettier": "^3.9.9",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.70.1"
+  }
+}
