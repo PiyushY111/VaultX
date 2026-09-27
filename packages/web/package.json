@@ -1,0 +1,38 @@
+{
+  "name": "@password-manager/web",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Web vault client",
+  "type": "module",
+  "scripts": {
+    "build:crypto": "tsc -b ../crypto",
+    "predev": "npm run build:crypto",
+    "dev": "vite",
+    "prebuild": "npm run build:crypto",
+    "build": "tsc -p tsconfig.json && vite build",
+    "preview": "vite preview",
+    "typecheck": "npm run build:crypto && tsc -p tsconfig.json",
+    "pretest": "npm run build:crypto",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test",
+    "clean": "rm -rf dist test-results playwright-report"
+  },
+  "dependencies": {
+    "@password-manager/crypto": "^0.0.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0",
+    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/react": "^16.3.3",
+    "@testing-library/user-event": "^14.6.7",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.1",
+    "jsdom": "^29.1.1",
+    "vite": "^8.3.1",
+    "vitest": "^4.1.11"
+  }
+}

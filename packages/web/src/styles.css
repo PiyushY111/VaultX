@@ -1,0 +1,824 @@
+/*
+ * Storehouse theme: dark indigo walls, silk-white text, gold for action and
+ * focus, and vermilion reserved for the "Locked" stamp and destructive
+ * actions.
+ *
+ * Fonts are subset to Latin and bundled locally (the production CSP allows
+ * only 'self'). Licenses: src/assets/fonts/OFL-*.txt.
+ */
+
+@font-face {
+  font-family: 'Shippori Mincho';
+  src: url('./assets/fonts/ShipporiMincho-Bold.subset.woff2') format('woff2');
+  font-weight: 700;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Shippori Mincho';
+  src: url('./assets/fonts/ShipporiMincho-ExtraBold.subset.woff2') format('woff2');
+  font-weight: 800;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Zen Kaku Gothic New';
+  src: url('./assets/fonts/ZenKakuGothicNew-Regular.subset.woff2') format('woff2');
+  font-weight: 400;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Zen Kaku Gothic New';
+  src: url('./assets/fonts/ZenKakuGothicNew-Medium.subset.woff2') format('woff2');
+  font-weight: 500;
+  font-display: swap;
+}
+
+:root {
+  --ink: #141a24;
+  --night: #1c2533;
+  --night-raised: #232e3f;
+  --indigo: #34506f;
+  --indigo-line: rgb(52 80 111 / 55%);
+  --silk: #e9e2d0;
+  --ash: #9d998f;
+  --gold: #c9a45c;
+  --gold-bright: #e0be78;
+  --vermilion: #c8553d;
+  --vermilion-text: #e5775e;
+
+  --serif: 'Shippori Mincho', 'Hiragino Mincho ProN', 'Yu Mincho', serif;
+  --sans: 'Zen Kaku Gothic New', 'Hiragino Sans', 'Yu Gothic', system-ui, sans-serif;
+  --mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+
+  /* Type scale: ratio 1.25 from a 15px base. */
+  --step--1: 0.8rem;
+  --step-0: 0.9375rem;
+  --step-1: 1.172rem;
+  --step-2: 1.465rem;
+  --step-3: 1.831rem;
+  --step-4: 2.289rem;
+
+  --radius: 3px;
+  color-scheme: dark;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--ink);
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--ink);
+  color: var(--silk);
+  font-family: var(--sans);
+  font-size: var(--step-0);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2 {
+  font-family: var(--serif);
+  font-weight: 700;
+  line-height: 1.25;
+  margin: 0;
+}
+
+h2 {
+  font-size: var(--step-3);
+  letter-spacing: 0.01em;
+}
+
+p {
+  margin: 0;
+}
+
+strong {
+  font-weight: 500;
+  color: var(--silk);
+}
+
+::selection {
+  background: rgb(201 164 92 / 35%);
+}
+
+:focus-visible {
+  outline: 2px solid var(--gold);
+  outline-offset: 2px;
+}
+
+/* ---------------------------------------------------------------------------
+ * Controls
+ */
+
+label,
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  color: var(--ash);
+  font-size: var(--step--1);
+  font-weight: 500;
+}
+
+label.inline {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+input,
+textarea,
+select {
+  font: inherit;
+  font-size: var(--step-0);
+  font-weight: 400;
+  color: var(--silk);
+  background: var(--ink);
+  border: 1px solid var(--indigo-line);
+  border-radius: var(--radius);
+  padding: 0.6rem 0.75rem;
+  transition: border-color 120ms ease;
+}
+
+input:hover,
+textarea:hover,
+select:hover {
+  border-color: var(--indigo);
+}
+
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: none;
+  border-color: var(--gold);
+  box-shadow: 0 0 0 3px rgb(201 164 92 / 18%);
+}
+
+input[type='checkbox'],
+input[type='range'] {
+  accent-color: var(--gold);
+}
+
+input[type='range'] {
+  padding: 0;
+  border: none;
+  background: none;
+  box-shadow: none;
+}
+
+textarea {
+  resize: vertical;
+  line-height: 1.5;
+}
+
+.btn {
+  font: inherit;
+  font-size: var(--step-0);
+  font-weight: 500;
+  color: var(--silk);
+  background: transparent;
+  border: 1px solid var(--indigo-line);
+  border-radius: var(--radius);
+  padding: 0.55rem 1rem;
+  cursor: pointer;
+  transition:
+    border-color 120ms ease,
+    background-color 120ms ease,
+    color 120ms ease;
+}
+
+.btn:hover {
+  border-color: var(--gold);
+}
+
+.btn:disabled {
+  opacity: 0.55;
+  cursor: progress;
+}
+
+.btn-primary {
+  background: var(--gold);
+  border-color: var(--gold);
+  color: var(--ink);
+}
+
+.btn-primary:hover {
+  background: var(--gold-bright);
+  border-color: var(--gold-bright);
+}
+
+.btn-quiet {
+  border-color: transparent;
+  color: var(--ash);
+  padding-inline: 0.6rem;
+}
+
+.btn-quiet:hover {
+  border-color: transparent;
+  color: var(--silk);
+  background: rgb(233 226 208 / 6%);
+}
+
+.btn-danger:hover {
+  color: var(--vermilion-text);
+  background: rgb(200 85 61 / 10%);
+}
+
+/* The lock button carries a small version of the stamp it's about to apply. */
+.btn-seal {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding-left: 0.5rem;
+  border-color: rgb(200 85 61 / 55%);
+}
+
+.btn-seal:hover {
+  border-color: var(--vermilion);
+  background: rgb(200 85 61 / 8%);
+}
+
+.btn-seal-glyph {
+  display: grid;
+  place-items: center;
+  width: 1.6rem;
+  height: 1.6rem;
+  border: 1.5px solid var(--vermilion);
+  border-radius: 4px;
+  color: var(--vermilion);
+}
+
+.btn-seal-glyph svg {
+  width: 0.75rem;
+  height: 0.85rem;
+}
+
+button.link {
+  font: inherit;
+  color: var(--gold);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: rgb(201 164 92 / 40%);
+  text-underline-offset: 0.25em;
+}
+
+button.link:hover {
+  text-decoration-color: var(--gold);
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.row input {
+  flex: 1 1 12rem;
+}
+
+.hint {
+  color: var(--ash);
+  font-size: var(--step--1);
+}
+
+.error {
+  color: var(--vermilion-text);
+  font-size: var(--step--1);
+  padding-left: 0.75rem;
+  border-left: 2px solid var(--vermilion);
+}
+
+.notice,
+.warning {
+  font-size: var(--step--1);
+  color: var(--silk);
+  padding: 0.6rem 0.85rem;
+  border-left: 2px solid var(--gold);
+  background: var(--night);
+}
+
+/* ---------------------------------------------------------------------------
+ * Login, sign-up and unlock: the storehouse wall beside the form.
+ */
+
+.auth {
+  display: grid;
+  grid-template-columns: minmax(15rem, 38%) 1fr;
+  min-height: 100vh;
+}
+
+/* Storehouse wall: raised plaster joints in a diagonal grid over dark tiles. */
+.wall {
+  position: relative;
+  overflow: hidden;
+  background-color: var(--night);
+  background-image:
+    repeating-linear-gradient(45deg, transparent 0 26px, rgb(233 226 208 / 7%) 26px 30px),
+    repeating-linear-gradient(-45deg, transparent 0 26px, rgb(233 226 208 / 7%) 26px 30px);
+  border-right: 1px solid var(--indigo-line);
+}
+
+.wall-mark {
+  position: absolute;
+  top: 12vh;
+  left: 50%;
+  transform: translateX(-50%);
+  width: clamp(8rem, 16vw, 13rem);
+  height: auto;
+  color: var(--silk);
+  filter: drop-shadow(0 0 1.5rem var(--night));
+}
+
+.wall-name {
+  position: absolute;
+  bottom: 8vh;
+  right: 2.25rem;
+  writing-mode: vertical-rl;
+  font-family: var(--serif);
+  font-weight: 700;
+  font-size: var(--step-1);
+  letter-spacing: 0.3em;
+  color: var(--ash);
+  padding-left: 0.9rem;
+  border-left: 1px solid var(--gold);
+}
+
+/* Stamped across the wall when the vault is locked. */
+.stamp {
+  position: absolute;
+  top: calc(12vh + clamp(6.5rem, 13vw, 10.5rem));
+  left: calc(50% + clamp(0.5rem, 2vw, 2rem));
+  padding: 0.55rem 1.1rem 0.6rem;
+  border: 3px solid var(--vermilion);
+  border-radius: 8px;
+  box-shadow:
+    inset 0 0 0 3px var(--night),
+    inset 0 0 0 4.5px var(--vermilion);
+  color: var(--vermilion);
+  font-family: var(--serif);
+  font-weight: 800;
+  font-size: 1.6rem;
+  letter-spacing: 0.06em;
+  line-height: 1;
+  transform: rotate(-8deg);
+  animation: stamp 520ms cubic-bezier(0.3, 1.4, 0.5, 1) both;
+}
+
+@keyframes stamp {
+  0% {
+    opacity: 0;
+    transform: scale(1.9) rotate(-18deg);
+  }
+
+  55% {
+    opacity: 1;
+    transform: scale(0.93) rotate(-6deg);
+  }
+
+  100% {
+    opacity: 1;
+    transform: scale(1) rotate(-8deg);
+  }
+}
+
+.auth-panel {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2rem;
+  padding: 3rem clamp(1.5rem, 7vw, 6rem);
+  max-width: 40rem;
+}
+
+.brand {
+  font-size: var(--step-0);
+  color: var(--ash);
+  letter-spacing: 0.04em;
+}
+
+.auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: 1.1rem;
+  max-width: 26rem;
+}
+
+.auth-form h2 {
+  font-size: var(--step-4);
+}
+
+.lede {
+  color: var(--ash);
+  margin-bottom: 0.4rem;
+}
+
+.auth-form .btn-primary {
+  margin-top: 0.4rem;
+  padding-block: 0.7rem;
+}
+
+.links {
+  font-size: var(--step--1);
+}
+
+/* ---------------------------------------------------------------------------
+ * The vault
+ */
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem 1.5rem;
+  padding: 0.85rem clamp(1rem, 4vw, 2.5rem);
+  background: rgb(20 26 36 / 92%);
+  backdrop-filter: blur(8px);
+}
+
+/* A single gold seam under the header, like a repaired crack. */
+.topbar::after {
+  content: '';
+  position: absolute;
+  inset: auto 0 0;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--gold) 18%,
+    var(--gold-bright) 46%,
+    rgb(201 164 92 / 35%) 64%,
+    var(--gold) 82%,
+    transparent
+  );
+}
+
+.topbar-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.mark {
+  width: 1.9rem;
+  height: 1.9rem;
+  color: var(--silk);
+}
+
+.topbar-title {
+  font-size: var(--step-0);
+  color: var(--ash);
+  letter-spacing: 0.04em;
+}
+
+.topbar-who {
+  color: var(--ash);
+  font-size: var(--step--1);
+  margin-right: auto;
+  overflow-wrap: anywhere;
+}
+
+.topbar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.autolock select {
+  padding-block: 0.4rem;
+}
+
+.vault-main {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  max-width: 56rem;
+  margin: 0 auto;
+  padding: 2.5rem clamp(1rem, 4vw, 2.5rem) 4rem;
+}
+
+.vault-head {
+  display: flex;
+  align-items: baseline;
+  gap: 1rem;
+}
+
+.vault-count {
+  color: var(--ash);
+  font-size: var(--step--1);
+}
+
+.vault-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+/* A brush-stroke baseline rather than a box. */
+.search {
+  flex: 1 1 16rem;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--indigo);
+  border-radius: 0;
+  padding-inline: 0.1rem;
+}
+
+.search:focus-visible {
+  box-shadow: none;
+  border-bottom-color: var(--gold);
+}
+
+.quiet-state {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 3rem 0;
+  color: var(--ash);
+}
+
+.quiet-state p:first-child {
+  font-family: var(--serif);
+  font-weight: 700;
+  font-size: var(--step-2);
+  color: var(--silk);
+}
+
+/* The ledger: entries separated by indigo rules, each with its crest. */
+.ledger {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border-top: 1px solid var(--indigo-line);
+}
+
+.entry {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: start;
+  gap: 0.25rem 1.1rem;
+  padding: 1.1rem 0.75rem;
+  border-bottom: 1px solid var(--indigo-line);
+  border-left: 2px solid transparent;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease;
+}
+
+.entry:hover,
+.entry:focus-within {
+  background: var(--night);
+  border-left-color: var(--gold);
+}
+
+/* The site's initial, set in a small double-ringed crest. */
+.initial {
+  display: grid;
+  place-items: center;
+  width: 2.6rem;
+  height: 2.6rem;
+  border-radius: 50%;
+  border: 1px solid var(--gold);
+  box-shadow:
+    inset 0 0 0 3px var(--ink),
+    inset 0 0 0 4px rgb(201 164 92 / 45%);
+  font-family: var(--serif);
+  font-weight: 700;
+  font-size: var(--step-1);
+  color: var(--gold);
+}
+
+.entry-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+}
+
+.entry-site {
+  font-family: var(--serif);
+  font-weight: 700;
+  font-size: var(--step-1);
+  overflow-wrap: anywhere;
+}
+
+.entry-user {
+  color: var(--ash);
+  overflow-wrap: anywhere;
+}
+
+.entry-secret {
+  font-family: var(--mono);
+  font-size: var(--step--1);
+  color: var(--ash);
+  letter-spacing: 0.08em;
+  margin-top: 0.3rem;
+  overflow-wrap: anywhere;
+}
+
+.entry-secret.is-revealed {
+  color: var(--gold-bright);
+  letter-spacing: 0.04em;
+}
+
+.entry-notes {
+  margin-top: 0.35rem;
+  color: var(--ash);
+  font-size: var(--step--1);
+  white-space: pre-wrap;
+}
+
+.entry-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.15rem;
+}
+
+/* Add / edit */
+.sheet {
+  display: flex;
+  flex-direction: column;
+  gap: 1.1rem;
+  max-width: 38rem;
+  padding: 2rem;
+  background: var(--night);
+  border: 1px solid var(--indigo-line);
+  border-top: 2px solid var(--gold);
+  border-radius: var(--radius);
+}
+
+.sheet h2 {
+  font-size: var(--step-3);
+}
+
+.secret-input {
+  font-family: var(--mono);
+}
+
+.sheet-actions {
+  margin-top: 0.4rem;
+}
+
+/* Password generator: framed with a dashed running stitch. */
+.generator {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  margin: 0;
+  padding: 1.25rem 1.4rem 1.4rem;
+  border: 1.5px dashed rgb(233 226 208 / 22%);
+  border-radius: var(--radius);
+  background: rgb(20 26 36 / 55%);
+  max-width: 38rem;
+}
+
+.generator legend {
+  font-family: var(--serif);
+  font-weight: 700;
+  font-size: var(--step-1);
+  color: var(--silk);
+  padding: 0 0.4rem;
+}
+
+.generated {
+  display: block;
+  font-family: var(--mono);
+  font-size: var(--step-1);
+  line-height: 1.5;
+  letter-spacing: 0.04em;
+  color: var(--gold-bright);
+  word-break: break-all;
+  padding: 0.85rem 1rem;
+  background: var(--ink);
+  border-radius: var(--radius);
+}
+
+.length span {
+  color: var(--ash);
+}
+
+.length strong {
+  font-family: var(--mono);
+  color: var(--silk);
+}
+
+.toggles {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1.4rem;
+}
+
+.toggles label {
+  font-size: var(--step-0);
+  color: var(--silk);
+  font-weight: 400;
+}
+
+.toggles .hint {
+  margin-left: auto;
+}
+
+/* ---------------------------------------------------------------------------
+ * Small screens: the wall becomes a band across the top.
+ */
+
+@media (max-width: 760px) {
+  .auth {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr;
+  }
+
+  .wall {
+    height: 9.5rem;
+    border-right: none;
+    border-bottom: 1px solid var(--indigo-line);
+  }
+
+  .wall-mark {
+    top: 50%;
+    left: 1.5rem;
+    transform: translateY(-50%);
+    width: 6rem;
+  }
+
+  .wall-name {
+    display: none;
+  }
+
+  .stamp {
+    top: 50%;
+    left: auto;
+    right: 1.5rem;
+    margin-top: -1.3rem;
+    font-size: 1.3rem;
+  }
+
+  .topbar {
+    position: static;
+    gap: 0.5rem 1rem;
+  }
+
+  .topbar-who {
+    flex-basis: 100%;
+    order: 1;
+  }
+
+  .topbar-actions {
+    order: 2;
+    width: 100%;
+  }
+
+  /* Lock and log out first; the auto-lock setting on its own line below. */
+  .topbar-actions .autolock {
+    order: 1;
+    width: 100%;
+  }
+
+  .auth-panel {
+    justify-content: flex-start;
+    padding-top: 2rem;
+  }
+
+  .entry {
+    grid-template-columns: auto 1fr;
+  }
+
+  .entry-actions {
+    grid-column: 2;
+    justify-content: flex-start;
+    margin-left: -0.6rem;
+  }
+
+  .sheet {
+    padding: 1.4rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .stamp {
+    animation: none;
+  }
+
+  * {
+    transition: none !important;
+  }
+}
