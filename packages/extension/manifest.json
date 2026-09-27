@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "VaultX",
+  "version": "0.1.0",
+  "description": "VaultX zero-knowledge password manager: autofill and save logins from your self-hosted vault.",
+  "minimum_chrome_version": "120",
+  "action": {
+    "default_title": "VaultX",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://*/*", "http://localhost/*", "http://127.0.0.1/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "permissions": ["storage", "alarms", "idle"],
+  "host_permissions": ["https://*/*", "http://localhost/*", "http://127.0.0.1/*"],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'none'; base-uri 'none'"
+  }
+}
