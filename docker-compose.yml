@@ -1,0 +1,52 @@
+# Self-hosted stack: Fastify API + Postgres.
+#   cp .env.example .env   # then fill in the secrets
+#   docker compose up --build
+name: password-manager
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-password_manager}
+      POSTGRES_USER: ${POSTGRES_USER:-password_manager}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env (see .env.example)}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    # Not published to the host: only the API talks to the database.
+
+  api:
+    build:
+      context: .
+      dockerfile: packages/server/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGPORT: 5432
+      PGDATABASE: ${POSTGRES_DB:-password_manager}
+      PGUSER: ${POSTGRES_USER:-password_manager}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env (see .env.example)}
+      HOST: 0.0.0.0
+      PORT: 3000
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-86400}
+      AUTH_RATE_LIMIT_MAX: ${AUTH_RATE_LIMIT_MAX:-10}
+      LOGIN_MAX_FAILURES: ${LOGIN_MAX_FAILURES:-5}
+      LOGIN_FAILURE_WINDOW_SECONDS: ${LOGIN_FAILURE_WINDOW_SECONDS:-900}
+      TRUST_PROXY: ${TRUST_PROXY:-false}
+      PRELOGIN_SECRET: ${PRELOGIN_SECRET:?Set PRELOGIN_SECRET in .env (see .env.example)}
+    ports:
+      # Bound to localhost: the API speaks plain HTTP, so expose it publicly
+      # only behind a TLS-terminating reverse proxy.
+      - '127.0.0.1:${API_PORT:-3000}:3000'
+
+volumes:
+  postgres-data:
