@@ -3,6 +3,7 @@ import {
   POPUP_REQUEST_TYPES,
   type ContentRequest,
   type FillCredentialMessage,
+  type NewItem,
   type PopupRequest,
   type Response,
   type VaultState,
@@ -132,6 +133,16 @@ async function handlePopup(request: PopupRequest, deps: RouterDeps): Promise<Res
       if (!url) throw new Error('Cannot fill this tab');
       const credential = await vault.credentialFor(request.itemId, url);
       await tabs.sendFill(request.tabId, { type: 'fillCredential', ...credential });
+      return ok(null);
+    }
+    case 'addItem': {
+      const item = (request.item ?? {}) as Partial<Record<keyof NewItem, unknown>>;
+      await vault.addItem({
+        site: String(item.site ?? ''),
+        username: String(item.username ?? ''),
+        password: String(item.password ?? ''),
+        notes: String(item.notes ?? ''),
+      });
       return ok(null);
     }
     case 'scheduleClipboardClear':

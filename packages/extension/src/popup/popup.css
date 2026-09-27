@@ -133,7 +133,8 @@ label {
 }
 
 input,
-select {
+select,
+textarea {
   font: inherit;
   font-size: 14px;
   color: var(--silk);
@@ -144,7 +145,8 @@ select {
 }
 
 input:focus-visible,
-select:focus-visible {
+select:focus-visible,
+textarea:focus-visible {
   outline: none;
   border-color: var(--gold);
   box-shadow: 0 0 0 3px rgb(201 164 92 / 18%);
@@ -446,4 +448,23 @@ form .btn-primary {
   padding: 1.25rem 0.25rem;
   color: var(--ash);
   font-size: 13px;
+}
+
+textarea {
+  resize: vertical;
+}
+
+.password-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.secret-input {
+  font-family: var(--mono, ui-monospace, monospace);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
 }

@@ -15,6 +15,14 @@ export interface ItemSummary {
   username: string;
 }
 
+/** A login typed into the popup's "Add login" form. */
+export interface NewItem {
+  site: string;
+  username: string;
+  password: string;
+  notes: string;
+}
+
 /** Full item, only ever sent to the popup (a trusted extension page). */
 export interface PopupItem extends ItemSummary {
   password: string;
@@ -42,6 +50,7 @@ export type PopupRequest =
   | { type: 'getMatchesForTab'; tabId: number }
   | { type: 'fillTab'; tabId: number; itemId: string }
   | { type: 'saveSettings'; settings: Settings }
+  | { type: 'addItem'; item: NewItem }
   /** Sent after the popup copies a password, so the background can clear it later. */
   | { type: 'scheduleClipboardClear' };
 
@@ -81,6 +90,7 @@ export const POPUP_REQUEST_TYPES = new Set<PopupRequest['type']>([
   'getMatchesForTab',
   'fillTab',
   'saveSettings',
+  'addItem',
   'scheduleClipboardClear',
 ]);
 

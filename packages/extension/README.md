@@ -2,6 +2,8 @@
 
 Manifest V3 browser extension (Chrome first). Unlocks the same vault as the
 web app, offers to autofill matching logins, and offers to save new ones.
+You can also add a login from the popup (**Add login**: the site is prefilled
+from the current tab, with a password generator).
 All cryptography runs in the background service worker via
 `@password-manager/crypto`; the server only sees the auth hash and ciphertext.
 

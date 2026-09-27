@@ -140,6 +140,27 @@ describe('handleMessage authorization', () => {
     expect(state).toMatchObject({ ok: true, data: { status: 'unlocked', email: 'a@example.com' } });
   });
 
+  it('lets the popup add a login once unlocked', async () => {
+    const item = { site: 'a.example.com', username: 'u', password: 'p', notes: '' };
+    expect(await handleMessage({ type: 'addItem', item }, popup, deps)).toMatchObject({
+      ok: false,
+      locked: true,
+    });
+    await handleMessage(
+      { type: 'unlock', email: 'a@example.com', password: 'MASTER-password-123' },
+      popup,
+      deps,
+    );
+    expect(await handleMessage({ type: 'addItem', item }, popup, deps)).toEqual({
+      ok: true,
+      data: null,
+    });
+    expect(await handleMessage({ type: 'listItems' }, popup, deps)).toMatchObject({
+      ok: true,
+      data: [item],
+    });
+  });
+
   it('lets the popup schedule clearing a copied password', async () => {
     expect(await handleMessage({ type: 'scheduleClipboardClear' }, popup, deps)).toEqual({
       ok: true,

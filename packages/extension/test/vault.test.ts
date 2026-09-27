@@ -341,3 +341,40 @@ describe('item revisions', () => {
     await expect(vault.resolvePendingSave(TAB, true)).rejects.toThrow('Changed elsewhere');
   });
 });
+
+describe('adding a login from the popup', () => {
+  const NEW = {
+    site: '  news.example.org ',
+    username: 'reader',
+    password: 'POPUP-ADDED-PASSWORD',
+    notes: 'POPUP notes',
+  };
+
+  it('encrypts it before sending, and it opens on a fresh instance', async () => {
+    const vault = makeVault();
+    await vault.unlock(EMAIL, PASSWORD);
+    await vault.addItem(NEW);
+
+    const post = server.requests.find(
+      (r) => r.method === 'POST' && r.url.endsWith('/vault-items'),
+    )!;
+    for (const value of [NEW.password, NEW.username, NEW.notes, 'news.example.org']) {
+      expect(post.body).not.toContain(value);
+    }
+    expect(JSON.parse(post.body)).toMatchObject({ revision: 1 });
+
+    const expected = expect.objectContaining({ ...NEW, site: 'news.example.org' });
+    expect(await makeVault().listForPopup()).toContainEqual(expected);
+    // Listed once, whether or not the list was cached before the save.
+    expect((await vault.listForPopup()).filter((i) => i.username === 'reader')).toHaveLength(1);
+  });
+
+  it('requires a site, and a vault that is unlocked', async () => {
+    const vault = makeVault();
+    await expect(vault.addItem(NEW)).rejects.toThrow(LockedError);
+    await vault.unlock(EMAIL, PASSWORD);
+    const before = server.items.length;
+    await expect(vault.addItem({ ...NEW, site: '   ' })).rejects.toThrow('Enter the site');
+    expect(server.items).toHaveLength(before);
+  });
+});

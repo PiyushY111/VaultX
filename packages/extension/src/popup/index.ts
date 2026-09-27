@@ -1,3 +1,8 @@
+// The same generator as the web vault (one implementation to review).
+import {
+  DEFAULT_GENERATOR_OPTIONS,
+  generatePassword,
+} from '../../../web/src/lib/passwordGenerator';
 import { emblem, keyhole } from '../shared/emblem';
 import type {
   ItemSummary,
@@ -61,6 +66,17 @@ function errorText(error: unknown): string {
 async function activeTabId(): Promise<number | null> {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   return tab?.id !== undefined && /^https?:/.test(tab.url ?? '') ? tab.id : null;
+}
+
+/** Hostname of the active http(s) tab, to prefill a new login's site. */
+async function activeTabHost(): Promise<string> {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  try {
+    const url = new URL(tab?.url ?? '');
+    return /^https?:$/.test(url.protocol) ? url.hostname.replace(/^www\./, '') : '';
+  } catch {
+    return '';
+  }
 }
 
 async function render(): Promise<void> {
@@ -190,7 +206,21 @@ async function renderVault(state: VaultState): Promise<void> {
       h('p', { class: 'muted' }, `Unlocked as ${state.email ?? ''}`),
       status,
       matchesSection,
-      h('h2', { class: 'section-title' }, 'All logins'),
+      h(
+        'div',
+        { class: 'row' },
+        h('h2', { class: 'section-title' }, 'All logins'),
+        h('span', { class: 'spacer' }),
+        h(
+          'button',
+          {
+            type: 'button',
+            class: 'btn btn-primary',
+            onclick: async () => renderAddItem(state, await activeTabHost()),
+          },
+          'Add login',
+        ),
+      ),
       search,
       list,
     ),
@@ -219,7 +249,7 @@ async function renderVault(state: VaultState): Promise<void> {
               { class: 'empty' },
               items.length
                 ? 'No logins match your search.'
-                : 'Your vault is empty. Add logins in the web vault, or save them as you sign in.',
+                : 'Your vault is empty. Add a login, or save them as you sign in.',
             ),
           ]),
     );
@@ -326,6 +356,106 @@ function itemRow(item: PopupItem, status: HTMLElement): HTMLLIElement {
       copyPassword,
     ),
   );
+}
+
+// --- Add login ---------------------------------------------------------------
+
+function renderAddItem(state: VaultState, site: string): void {
+  const siteInput = h('input', { name: 'site', required: true, autocomplete: 'off' });
+  siteInput.value = site;
+  const username = h('input', { name: 'username', autocomplete: 'off' });
+  const password = h('input', {
+    id: 'new-item-password',
+    type: 'password',
+    name: 'password',
+    class: 'secret-input',
+    autocomplete: 'new-password',
+  });
+  const notes = h('textarea', { name: 'notes', rows: '3' });
+  const error = h('p', { class: 'error', role: 'alert' });
+  const submit = h('button', { type: 'submit', class: 'btn btn-primary' }, 'Save');
+
+  const toggle = h(
+    'button',
+    {
+      type: 'button',
+      class: 'btn btn-quiet',
+      onclick: () => {
+        const show = password.type === 'password';
+        password.type = show ? 'text' : 'password';
+        toggle.textContent = show ? 'Hide' : 'Show';
+      },
+    },
+    'Show',
+  );
+  const generate = h(
+    'button',
+    {
+      type: 'button',
+      class: 'btn',
+      onclick: () => {
+        password.value = generatePassword(DEFAULT_GENERATOR_OPTIONS);
+        password.type = 'text';
+        toggle.textContent = 'Hide';
+      },
+    },
+    'Generate',
+  );
+
+  mount(
+    h('header', { class: 'topbar' }, emblem('mark'), h('h1', { class: 'brand' }, 'Add login')),
+    h(
+      'form',
+      {
+        class: 'panel',
+        'aria-label': 'Add login',
+        onsubmit: async (event: Event) => {
+          event.preventDefault();
+          submit.disabled = true;
+          submit.textContent = 'Encrypting…';
+          error.textContent = '';
+          try {
+            await send({
+              type: 'addItem',
+              item: {
+                site: siteInput.value,
+                username: username.value,
+                password: password.value,
+                notes: notes.value,
+              },
+            });
+            await render();
+          } catch (err) {
+            onRequestError(err, (message) => (error.textContent = message));
+            submit.disabled = false;
+            submit.textContent = 'Save';
+          }
+        },
+      },
+      h('label', {}, 'Site', siteInput),
+      h('label', {}, 'Username', username),
+      h(
+        'div',
+        { class: 'field' },
+        h('label', { for: 'new-item-password' }, 'Password'),
+        h('div', { class: 'row password-row' }, password, toggle, generate),
+      ),
+      h('label', {}, 'Notes', notes),
+      h('p', { class: 'muted' }, 'Encrypted on this device before it’s sent to your server.'),
+      error,
+      h(
+        'div',
+        { class: 'row' },
+        submit,
+        h(
+          'button',
+          { type: 'button', class: 'btn btn-quiet', onclick: () => void renderVault(state) },
+          'Cancel',
+        ),
+      ),
+    ),
+  );
+  (site ? username : siteInput).focus();
 }
 
 /** First letter of the site's name, shown in a small crest. */

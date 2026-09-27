@@ -397,3 +397,38 @@ test('clears a password copied in the popup after 30 seconds, even once the popu
     await context.close();
   }
 });
+
+test('adds a login from the popup, encrypted before it is sent', async ({ userDataDir }) => {
+  const account = await createAccount();
+  const { context, extensionId } = await launch(userDataDir);
+  const apiTraffic: string[] = [];
+  context.on('request', (request) => {
+    if (request.url().startsWith(API_URL)) apiTraffic.push(request.postData() ?? '');
+  });
+  try {
+    const popup = await openPopup(context, extensionId);
+    await unlockInPopup(popup, account);
+    await popup.getByRole('button', { name: 'Add login' }).click();
+    const form = popup.getByRole('form', { name: 'Add login' });
+    await form.getByLabel('Site').fill('popup-added.example.com');
+    await form.getByLabel('Username').fill('popup-user');
+    await form.getByRole('button', { name: 'Generate' }).click();
+    const generated = await form.getByLabel('Password').inputValue();
+    expect(generated).toHaveLength(20);
+    await form.getByLabel('Notes').fill('POPUP-NOTES');
+    await form.getByRole('button', { name: 'Save' }).click();
+
+    await expect(popup.getByRole('listitem', { name: 'popup-added.example.com' })).toContainText(
+      'popup-user',
+    );
+    const { decrypted } = await listItems(account);
+    expect(decrypted).toMatchObject([
+      { site: 'popup-added.example.com', username: 'popup-user', password: generated },
+    ]);
+    for (const secret of [generated, 'popup-user', 'POPUP-NOTES']) {
+      expect(apiTraffic.join('\n')).not.toContain(secret);
+    }
+  } finally {
+    await context.close();
+  }
+});

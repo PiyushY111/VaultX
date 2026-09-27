@@ -306,6 +306,13 @@ export class Vault {
     }
   }
 
+  /** Encrypts and saves a login entered in the popup, like the web vault's "Add item". */
+  async addItem(data: VaultItemData): Promise<void> {
+    const site = data.site.trim();
+    if (!site) throw new Error('Enter the site for this login');
+    await this.saveItem({ ...data, site });
+  }
+
   /** Saves a new item (revision 1, fresh id) or the next revision of `existing`. */
   private async saveItem(data: VaultItemData, existing?: VaultItem): Promise<void> {
     const session = await this.requireSession();
@@ -332,7 +339,10 @@ export class Vault {
       password,
       notes,
     };
-    const items = await this.getItems();
+    // Nothing cached (e.g. after a service-worker restart): the next read
+    // fetches the list, which already includes this save.
+    if (!this.items) return;
+    const items = this.items;
     this.items = existing
       ? items.map((item) => (item.id === existing.id ? saved : item))
       : [...items, saved];
