@@ -1,8 +1,22 @@
+import { generateVaultKey } from '@password-manager/crypto';
+import sodium from 'libsodium-wrappers-sumo';
 import { describe, expect, it } from 'vitest';
-import { filterItems, parseItem, serializeItem, type VaultItem } from './items';
+import type { ItemResponse } from '../api';
+import { toBase64 } from '../lib/base64';
+import {
+  decryptVaultItems,
+  encryptNewItem,
+  encryptNextRevision,
+  filterItems,
+  parseItem,
+  serializeItem,
+  type VaultItem,
+} from './items';
+import { createRevisionLedger } from './revisionLedger';
 
 const item = (site: string, username = '', notes = '', password = 'pw'): VaultItem => ({
   id: site,
+  revision: 1,
   site,
   username,
   password,
@@ -68,5 +82,81 @@ describe('filterItems', () => {
 
   it('never matches against passwords', () => {
     expect(filterItems(items, 'secret-github')).toEqual([]);
+  });
+});
+
+describe('encrypted items are bound to their id and revision', () => {
+  const DATA = { site: 'bank.example.com', username: 'alice', password: 'pw-1', notes: '' };
+  const OTHER = { site: 'github.com', username: 'octocat', password: 'pw-2', notes: '' };
+  const response = (payload: Awaited<ReturnType<typeof encryptNewItem>>): ItemResponse => ({
+    ...payload,
+    created_at: '',
+    updated_at: '',
+  });
+
+  it('decrypts at the id and revision it was saved as', async () => {
+    const key = await generateVaultKey();
+    const saved = response(await encryptNewItem(DATA, key));
+    expect(saved.revision).toBe(1);
+    const next = response(await encryptNextRevision(saved, { ...DATA, password: 'pw-3' }, key));
+    expect(next).toMatchObject({ id: saved.id, revision: 2 });
+    const { items, failedIds } = await decryptVaultItems([saved, next], key);
+    expect(failedIds).toEqual([]);
+    expect(items.map((i) => i.password)).toEqual(['pw-1', 'pw-3']);
+  });
+
+  it('rejects contents swapped between two items', async () => {
+    const key = await generateVaultKey();
+    const a = response(await encryptNewItem(DATA, key));
+    const b = response(await encryptNewItem(OTHER, key));
+    const swapped = [
+      { ...a, encrypted_data: b.encrypted_data, nonce: b.nonce },
+      { ...b, encrypted_data: a.encrypted_data, nonce: a.nonce },
+    ];
+    expect((await decryptVaultItems(swapped, key)).failedIds).toEqual([a.id, b.id]);
+  });
+
+  it('rejects an old ciphertext relabelled as the current revision', async () => {
+    const key = await generateVaultKey();
+    const v1 = response(await encryptNewItem(DATA, key));
+    const relabelled = { ...v1, revision: 2 };
+    expect((await decryptVaultItems([relabelled], key)).failedIds).toEqual([v1.id]);
+  });
+
+  it('flags an item served at an older revision than this browser has seen', async () => {
+    const key = await generateVaultKey();
+    const ledger = createRevisionLedger('alice@example.com');
+    const v1 = response(await encryptNewItem(DATA, key));
+    const v2 = response(await encryptNextRevision(v1, { ...DATA, password: 'pw-new' }, key));
+    expect((await decryptVaultItems([v2], key, ledger)).items).toHaveLength(1);
+
+    // The server serves the old, genuinely-encrypted revision 1 again.
+    const result = await decryptVaultItems([v1], key, ledger);
+    expect(result.items).toEqual([]);
+    expect(result.rolledBackIds).toEqual([v1.id]);
+    expect(result.failedIds).toEqual([]);
+  });
+
+  it('opens items saved before binding existed as revision 0', async () => {
+    const key = await generateVaultKey();
+    await sodium.ready;
+    const nonce = sodium.randombytes_buf(24);
+    const ciphertext = sodium.crypto_aead_xchacha20poly1305_ietf_encrypt(
+      serializeItem(DATA),
+      'password-manager:v1:item',
+      null,
+      nonce,
+      key,
+    );
+    const legacy: ItemResponse = {
+      id: crypto.randomUUID(),
+      revision: 0,
+      encrypted_data: toBase64(ciphertext),
+      nonce: toBase64(nonce),
+      created_at: '',
+      updated_at: '',
+    };
+    const { items } = await decryptVaultItems([legacy], key);
+    expect(items).toMatchObject([{ ...DATA, revision: 0 }]);
   });
 });

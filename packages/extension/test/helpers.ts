@@ -31,6 +31,7 @@ export class MemoryStore implements KeyValueStore {
 
 interface StoredItem {
   id: string;
+  revision: number;
   encrypted_data: string;
   nonce: string;
 }
@@ -86,9 +87,16 @@ export function createFakeServer() {
         items: items.map((item) => ({ ...item, created_at: now, updated_at: now })),
       });
     }
+    if (path === '/logout' && method === 'POST') {
+      tokens.delete((headers.authorization ?? '').replace(/^Bearer /, ''));
+      return new Response(null, { status: 204 });
+    }
     if (path === '/vault-items' && method === 'POST') {
+      if (body.revision !== 1 || items.some((item) => item.id === body.id))
+        return json(409, { message: 'Conflict' });
       const item = {
-        id: `item-${nextId++}`,
+        id: body.id,
+        revision: 1,
         encrypted_data: body.encrypted_data,
         nonce: body.nonce,
       };
@@ -98,7 +106,13 @@ export function createFakeServer() {
     const match = /^\/vault-items\/(.+)$/.exec(path);
     const existing = match && items.find((item) => item.id === decodeURIComponent(match[1]!));
     if (existing && method === 'PUT') {
-      Object.assign(existing, { encrypted_data: body.encrypted_data, nonce: body.nonce });
+      if (body.revision !== existing.revision + 1)
+        return json(409, { message: 'Changed elsewhere', current_revision: existing.revision });
+      Object.assign(existing, {
+        revision: body.revision,
+        encrypted_data: body.encrypted_data,
+        nonce: body.nonce,
+      });
       return json(200, { ...existing, created_at: now, updated_at: now });
     }
     return json(404, { message: 'Not found' });
@@ -108,6 +122,7 @@ export function createFakeServer() {
     fetch,
     requests,
     items,
+    tokens,
     expireSessions: () => tokens.clear(),
     /** Registers an account the way the web vault would; returns its vault key for seeding items. */
     async register(email: string, password: string): Promise<Uint8Array> {
@@ -125,11 +140,10 @@ export function createFakeServer() {
       });
       return vaultKey;
     },
-    async seedItem(vaultKey: Uint8Array, data: VaultItemData): Promise<string> {
-      const payload = await encryptVaultItem(data, vaultKey);
-      const id = `item-${nextId++}`;
-      items.push({ id, ...payload });
-      return id;
+    async seedItem(vaultKey: Uint8Array, data: VaultItemData, revision = 1): Promise<string> {
+      const payload = await encryptVaultItem(data, vaultKey, crypto.randomUUID(), revision);
+      items.push(payload);
+      return payload.id;
     },
   };
 }

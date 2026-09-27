@@ -4,6 +4,7 @@ import type { ItemSummary, PendingSavePrompt, PopupItem, Settings } from '../sha
 import { securePageHost, siteMatchesHost } from '../shared/urls';
 import { ApiError, createApi, describeLoginFailure, type Api } from './api';
 import { decryptVaultItems, encryptVaultItem, type VaultItem, type VaultItemData } from './items';
+import { createRevisionLedger } from './revisions';
 import type { KeyValueStore } from './storage';
 
 /**
@@ -22,7 +23,8 @@ import type { KeyValueStore } from './storage';
  *   (localStorage, IndexedDB) are not used at all.
  *
  * Locking (manual, inactivity timeout, OS screen lock, expired session, or
- * browser restart) zeroes the in-memory key and clears session storage.
+ * browser restart) zeroes the in-memory key, clears session storage, and
+ * ends the server session.
  */
 
 export class LockedError extends Error {
@@ -58,9 +60,13 @@ interface PendingSave {
 export interface VaultDeps {
   /** chrome.storage.session in production. */
   session: KeyValueStore;
+  /** chrome.storage.local in production. Holds only non-secret data (the revision ledger). */
+  local: KeyValueStore;
   fetch: typeof fetch;
   now: () => number;
   getSettings: () => Promise<Settings>;
+  /** Called after every lock (e.g. to clear a copied password). */
+  onLock?: () => Promise<void>;
 }
 
 const SESSION_KEY = 'session';
@@ -163,10 +169,15 @@ export class Vault {
   }
 
   async lock(): Promise<void> {
-    if (this.active) wipe(this.active.vaultKey);
+    const session = await this.restore();
+    if (session) wipe(session.vaultKey);
     this.active = null;
     this.items = null;
     await this.deps.session.clear();
+    // Unlocking logs in afresh, so the old server session would only linger.
+    // Best effort, and not awaited: the vault is already locked.
+    session?.api.logout(session.token).catch(() => {});
+    await this.deps.onLock?.().catch(() => {});
   }
 
   /** Records user activity with the extension, resetting the inactivity timer. */
@@ -184,11 +195,17 @@ export class Vault {
     return true;
   }
 
+  private ledger(session: ActiveSession) {
+    return createRevisionLedger(this.deps.local, session.email);
+  }
+
   private async getItems(): Promise<VaultItem[]> {
     if (this.items) return this.items;
     const session = await this.requireSession();
     const { items } = await this.call((s) => s.api.listItems(s.token));
-    const decrypted = await decryptVaultItems(items, session.vaultKey);
+    // Items that fail to decrypt, or that the server rolled back to an older
+    // revision than this browser has seen, are left out.
+    const decrypted = await decryptVaultItems(items, session.vaultKey, this.ledger(session));
     this.items = decrypted.items;
     return this.items;
   }
@@ -278,7 +295,7 @@ export class Vault {
     const items = await this.getItems();
     const existing = pending.itemId ? items.find((item) => item.id === pending.itemId) : undefined;
     if (existing) {
-      await this.saveItem({ ...existing, password: pending.password }, existing.id);
+      await this.saveItem({ ...existing, password: pending.password }, existing);
     } else {
       await this.saveItem({
         site: pending.host,
@@ -289,16 +306,36 @@ export class Vault {
     }
   }
 
-  private async saveItem(data: VaultItemData, id?: string): Promise<void> {
+  /** Saves a new item (revision 1, fresh id) or the next revision of `existing`. */
+  private async saveItem(data: VaultItemData, existing?: VaultItem): Promise<void> {
     const session = await this.requireSession();
-    const payload = await encryptVaultItem(data, session.vaultKey);
-    const response = await this.call((s) =>
-      id ? s.api.updateItem(s.token, id, payload) : s.api.createItem(s.token, payload),
-    );
+    const payload = existing
+      ? await encryptVaultItem(data, session.vaultKey, existing.id, existing.revision + 1)
+      : await encryptVaultItem(data, session.vaultKey, crypto.randomUUID(), 1);
+    let response: Awaited<ReturnType<Api['createItem']>>;
+    try {
+      response = await this.call((s) =>
+        existing ? s.api.updateItem(s.token, payload) : s.api.createItem(s.token, payload),
+      );
+    } catch (error) {
+      // Changed elsewhere since we loaded it: reload before the next attempt.
+      if (error instanceof ApiError && error.status === 409) this.items = null;
+      throw error;
+    }
+    await this.ledger(session).record([response]);
     const { site, username, password, notes } = data;
-    const saved: VaultItem = { id: response.id, site, username, password, notes };
+    const saved: VaultItem = {
+      id: response.id,
+      revision: response.revision,
+      site,
+      username,
+      password,
+      notes,
+    };
     const items = await this.getItems();
-    this.items = id ? items.map((item) => (item.id === id ? saved : item)) : [...items, saved];
+    this.items = existing
+      ? items.map((item) => (item.id === existing.id ? saved : item))
+      : [...items, saved];
   }
 
   async forgetTab(tabId: number): Promise<void> {

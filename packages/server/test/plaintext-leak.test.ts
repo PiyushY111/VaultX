@@ -4,14 +4,15 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   b64,
   bearer,
+  createClientUser,
   createItem,
   createTestContext,
-  encryptedItemPayload,
   listTables,
   login,
   registerAndLogin,
   scanDatabaseForSecrets,
   unb64,
+  updatePayload,
   type ClientUser,
   type ItemResponse,
   type Secret,
@@ -22,6 +23,7 @@ import {
 // match inside random ciphertext.
 const ALICE_PASSWORD = 'alice-MASTER-PASSWORD-correct-horse-7c1e';
 const BOB_PASSWORD = 'bob-MASTER-PASSWORD-tr0ub4dor-3d91';
+const BOB_NEW_PASSWORD = 'bob-NEW-MASTER-PASSWORD-after-change-5e2a';
 
 interface PlainItem {
   site: string;
@@ -63,13 +65,21 @@ describe('raw database rows never contain plaintext or key material', () => {
   let ctx: TestContext;
   let alice: ClientUser;
   let bob: ClientUser;
+  /** Bob before his password change (old keys, old vault key). */
+  let bobBefore: ClientUser;
   let aliceTokens: string[];
   let bobTokens: string[];
   let secrets: Secret[];
   /** What the client sent for each live item, keyed by item id. */
   const sentItems = new Map<
     string,
-    { ciphertext: string; nonce: string; plaintext: string; owner: 'alice' | 'bob' }
+    {
+      revision: number;
+      ciphertext: string;
+      nonce: string;
+      plaintext: string;
+      owner: 'alice' | 'bob';
+    }
   >();
 
   beforeAll(async () => {
@@ -85,6 +95,7 @@ describe('raw database rows never contain plaintext or key material', () => {
 
     const record = (created: ItemResponse, plaintext: string, owner: 'alice' | 'bob') =>
       sentItems.set(created.id, {
+        revision: created.revision,
         ciphertext: created.encrypted_data,
         nonce: created.nonce,
         plaintext,
@@ -98,14 +109,51 @@ describe('raw database rows never contain plaintext or key material', () => {
       aliceCreated.push(created);
       record(created, json, 'alice');
     }
+    const bobCreated: { item: ItemResponse; json: string }[] = [];
     for (const plain of BOB_ITEMS) {
       const json = JSON.stringify(plain);
-      record(await createItem(app, b.token, bob.vaultKey, json), json, 'bob');
+      const created = await createItem(app, b.token, bob.vaultKey, json);
+      bobCreated.push({ item: created, json });
+      record(created, json, 'bob');
+    }
+
+    // Bob changes his master password, which re-encrypts his items under a new vault key.
+    bobBefore = bob;
+    bob = await createClientUser(bob.email, BOB_NEW_PASSWORD);
+    const reencrypted = await Promise.all(
+      bobCreated.map(async ({ item: created, json }) => ({
+        id: created.id,
+        ...(await updatePayload(json, bob.vaultKey, created)),
+      })),
+    );
+    const change = await app.inject({
+      method: 'POST',
+      url: '/account/password',
+      headers: bearer(b.token),
+      payload: {
+        current_auth_hash: b64(bobBefore.authHash),
+        auth_hash: b64(bob.authHash),
+        kdf_salt: b64(bob.salt),
+        kdf_params: bob.kdfParams,
+        encrypted_vault_key: b64(bob.wrappedVaultKey.ciphertext),
+        vault_key_nonce: b64(bob.wrappedVaultKey.nonce),
+        items: reencrypted,
+      },
+    });
+    expect(change.statusCode, change.body).toBe(200);
+    for (const [i, sent] of reencrypted.entries()) {
+      sentItems.set(sent.id, {
+        revision: sent.revision,
+        ciphertext: sent.encrypted_data,
+        nonce: sent.nonce,
+        plaintext: bobCreated[i]!.json,
+        owner: 'bob',
+      });
     }
 
     // Update alice's first item, delete her third.
     const updatedJson = JSON.stringify(ALICE_ITEM_UPDATED);
-    const payload = await encryptedItemPayload(updatedJson, alice.vaultKey);
+    const payload = await updatePayload(updatedJson, alice.vaultKey, aliceCreated[0]!);
     const put = await app.inject({
       method: 'PUT',
       url: `/vault-items/${aliceCreated[0]!.id}`,
@@ -114,6 +162,7 @@ describe('raw database rows never contain plaintext or key material', () => {
     });
     expect(put.statusCode, put.body).toBe(200);
     sentItems.set(aliceCreated[0]!.id, {
+      revision: payload.revision,
       ciphertext: payload.encrypted_data,
       nonce: payload.nonce,
       plaintext: updatedJson,
@@ -130,6 +179,7 @@ describe('raw database rows never contain plaintext or key material', () => {
     secrets = [
       ...userSecrets('alice', alice, aliceTokens),
       ...userSecrets('bob', bob, bobTokens),
+      ...userSecrets('bob (before password change)', bobBefore, []),
       ...ALICE_ITEMS.flatMap((plain, i) => itemSecrets(`alice item ${i}`, plain)),
       ...itemSecrets('alice updated item', ALICE_ITEM_UPDATED),
       ...BOB_ITEMS.flatMap((plain, i) => itemSecrets(`bob item ${i}`, plain)),
@@ -153,9 +203,9 @@ describe('raw database rows never contain plaintext or key material', () => {
   it('finds no master password, item plaintext, key, raw authHash or session token in any cell, in any encoding', async () => {
     const leaks = await scanDatabaseForSecrets(ctx.pool, secrets);
     expect(leaks).toEqual([]);
-    // Sanity check that the scan covered what we think it did: 2 users x
-    // (5 keys/passwords) + 3 session tokens + 5 items x (JSON + 4 fields).
-    expect(secrets).toHaveLength(2 * 5 + 3 + 5 * 5);
+    // Sanity check that the scan covered what we think it did: 3 key sets
+    // (alice, bob before and after his password change) x (5 keys/passwords) + 3 session tokens + 5 items x (JSON + 4 fields).
+    expect(secrets).toHaveLength(3 * 5 + 3 + 5 * 5);
   });
 
   it('users: stores only a hash of the authHash, plus ciphertext, nonce, salt and params exactly as sent', async () => {
@@ -203,7 +253,7 @@ describe('raw database rows never contain plaintext or key material', () => {
   it('vault_items: stores exactly the ciphertext and nonce the client sent, nothing else', async () => {
     const { rows } = await ctx.pool.query('SELECT * FROM vault_items');
     expect(Object.keys(rows[0]).sort()).toEqual(
-      ['created_at', 'encrypted_data', 'id', 'nonce', 'updated_at', 'user_id'].sort(),
+      ['created_at', 'encrypted_data', 'id', 'nonce', 'revision', 'updated_at', 'user_id'].sort(),
     );
     expect(rows).toHaveLength(sentItems.size);
 
@@ -216,18 +266,33 @@ describe('raw database rows never contain plaintext or key material', () => {
       expect(row.encrypted_data).toEqual(Buffer.from(unb64(sent.ciphertext)));
       // Ciphertext-shaped: exactly plaintext length plus the 16-byte tag.
       expect(row.encrypted_data).toHaveLength(Buffer.byteLength(sent.plaintext) + 16);
-      expect(await decryptItem(row.encrypted_data, row.nonce, owner.vaultKey)).toBe(sent.plaintext);
-      const otherUser = owner === alice ? bob : alice;
-      await expect(decryptItem(row.encrypted_data, row.nonce, otherUser.vaultKey)).rejects.toThrow(
-        DecryptionError,
+      expect(row.revision).toBe(sent.revision);
+      const binding = { itemId: row.id, revision: row.revision };
+      expect(await decryptItem(row.encrypted_data, row.nonce, owner.vaultKey, binding)).toBe(
+        sent.plaintext,
       );
+      const otherKeys = [alice, bob, bobBefore].filter((user) => user !== owner);
+      for (const other of otherKeys) {
+        await expect(
+          decryptItem(row.encrypted_data, row.nonce, other.vaultKey, binding),
+        ).rejects.toThrow(DecryptionError);
+      }
     }
   });
 
   it('sessions: stores only SHA-256 hashes of bearer tokens', async () => {
     const { rows } = await ctx.pool.query('SELECT * FROM sessions');
     expect(Object.keys(rows[0]).sort()).toEqual(
-      ['expires_at', 'id', 'token_hash', 'user_id'].sort(),
+      [
+        'client',
+        'created_at',
+        'expires_at',
+        'id',
+        'last_used_at',
+        'token_hash',
+        'user_agent',
+        'user_id',
+      ].sort(),
     );
     const allTokens = [...aliceTokens, ...bobTokens];
     expect(rows).toHaveLength(allTokens.length);

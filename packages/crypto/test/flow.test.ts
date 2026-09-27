@@ -23,7 +23,8 @@ describe('end-to-end: register, then log in on a new device', () => {
     const registerKeys = await deriveKeys(await deriveMasterKey(password, salt, kdfParams));
     const vaultKey = await generateVaultKey();
     const wrappedVaultKey = await encryptVaultKey(vaultKey, registerKeys.stretchedMasterKey);
-    const encryptedItem = await encryptItem(item, vaultKey);
+    const binding = { itemId: crypto.randomUUID(), revision: 1 };
+    const encryptedItem = await encryptItem(item, vaultKey, binding);
 
     // Login: re-derive from the password and the server-provided salt/params.
     const loginKeys = await deriveKeys(await deriveMasterKey(password, salt, kdfParams));
@@ -34,7 +35,7 @@ describe('end-to-end: register, then log in on a new device', () => {
       loginKeys.stretchedMasterKey,
     );
     expect(
-      await decryptItem(encryptedItem.ciphertext, encryptedItem.nonce, recoveredVaultKey),
+      await decryptItem(encryptedItem.ciphertext, encryptedItem.nonce, recoveredVaultKey, binding),
     ).toBe(item);
 
     // Wrong password: different authHash, and the vault key cannot be unwrapped.

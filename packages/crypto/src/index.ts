@@ -14,7 +14,9 @@ export {
   encryptItem,
   encryptVaultKey,
   generateVaultKey,
+  LEGACY_ITEM_REVISION,
   type EncryptedPayload,
+  type ItemBinding,
 } from './aead.js';
 export { CryptoInputError, DecryptionError } from './errors.js';
 export { KEY_BYTES, NONCE_BYTES, SALT_BYTES, TAG_BYTES } from './constants.js';

@@ -70,10 +70,37 @@ export interface EncryptedItemPayload {
   nonce: string;
 }
 
+/** A save of one item: its id and revision are bound into the ciphertext. */
+export interface ItemRevisionPayload extends EncryptedItemPayload {
+  id: string;
+  revision: number;
+}
+
 export interface ItemResponse extends EncryptedItemPayload {
   id: string;
+  revision: number;
   created_at: string;
   updated_at: string;
+}
+
+export interface SessionInfo {
+  id: string;
+  client: 'web' | 'extension' | null;
+  user_agent: string | null;
+  created_at: string;
+  last_used_at: string;
+  expires_at: string;
+  current: boolean;
+}
+
+export interface ChangePasswordRequest {
+  current_auth_hash: string;
+  auth_hash: string;
+  kdf_salt: string;
+  kdf_params: KdfParams;
+  encrypted_vault_key: string;
+  vault_key_nonce: string;
+  items: ItemRevisionPayload[];
 }
 
 async function request<T>(
@@ -106,14 +133,24 @@ export const api = {
   signup: (body: SignupRequest) => request<{ id: string }>('POST', '/signup', { body }),
   prelogin: (email: string) => request<PreloginResponse>('POST', '/prelogin', { body: { email } }),
   login: (email: string, authHash: string) =>
-    request<LoginResponse>('POST', '/login', { body: { email, auth_hash: authHash } }),
+    request<LoginResponse>('POST', '/login', {
+      body: { email, auth_hash: authHash, client: 'web' },
+    }),
+  logout: (token: string) => request<void>('POST', '/logout', { token }),
   getVaultKey: (token: string) => request<VaultKeyResponse>('GET', '/vault-key', { token }),
   listItems: (token: string) =>
     request<{ items: ItemResponse[] }>('GET', '/vault-items', { token }),
-  createItem: (token: string, body: EncryptedItemPayload) =>
+  createItem: (token: string, body: ItemRevisionPayload) =>
     request<ItemResponse>('POST', '/vault-items', { token, body }),
-  updateItem: (token: string, id: string, body: EncryptedItemPayload) =>
+  updateItem: (token: string, { id, ...body }: ItemRevisionPayload) =>
     request<ItemResponse>('PUT', `/vault-items/${encodeURIComponent(id)}`, { token, body }),
   deleteItem: (token: string, id: string) =>
     request<void>('DELETE', `/vault-items/${encodeURIComponent(id)}`, { token }),
+  listSessions: (token: string) =>
+    request<{ sessions: SessionInfo[] }>('GET', '/sessions', { token }),
+  revokeSession: (token: string, id: string) =>
+    request<void>('DELETE', `/sessions/${encodeURIComponent(id)}`, { token }),
+  revokeAllSessions: (token: string) => request<void>('DELETE', '/sessions', { token }),
+  changePassword: (token: string, body: ChangePasswordRequest) =>
+    request<{ items: ItemResponse[] }>('POST', '/account/password', { token, body }),
 };

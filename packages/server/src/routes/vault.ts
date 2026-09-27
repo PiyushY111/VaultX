@@ -5,37 +5,49 @@ import { decodeBytes, encodeBytes } from '../encoding.js';
 import { conflict, notFound } from '../http-errors.js';
 import { MAX_ITEM_CIPHERTEXT_BYTES, NONCE_BYTES, TAG_BYTES, type KdfParams } from '../limits.js';
 import {
-  itemBodySchema,
+  createItemBodySchema,
   itemIdParamsSchema,
   itemListResponseSchema,
   itemResponseSchema,
+  updateItemBodySchema,
   vaultKeyResponseSchema,
 } from '../schemas.js';
 
-interface ItemBody {
+interface CiphertextBody {
   encrypted_data: string;
   nonce: string;
 }
 
-interface ItemRow {
+interface CreateItemBody extends CiphertextBody {
   id: string;
+  revision: number;
+}
+
+interface UpdateItemBody extends CiphertextBody {
+  revision: number;
+}
+
+export interface ItemRow {
+  id: string;
+  revision: number;
   encrypted_data: Buffer;
   nonce: Buffer;
   created_at: Date;
   updated_at: Date;
 }
 
-const ITEM_COLUMNS = 'id, encrypted_data, nonce, created_at, updated_at';
+export const ITEM_COLUMNS = 'id, revision, encrypted_data, nonce, created_at, updated_at';
 
-const toItemResponse = (row: ItemRow) => ({
+export const toItemResponse = (row: ItemRow) => ({
   id: row.id,
+  revision: row.revision,
   encrypted_data: encodeBytes(row.encrypted_data),
   nonce: encodeBytes(row.nonce),
   created_at: row.created_at,
   updated_at: row.updated_at,
 });
 
-function decodeItem(body: ItemBody): { encryptedData: Buffer; nonce: Buffer } {
+export function decodeCiphertext(body: CiphertextBody): { encryptedData: Buffer; nonce: Buffer } {
   return {
     encryptedData: decodeBytes(body.encrypted_data, 'encrypted_data', {
       min: TAG_BYTES,
@@ -45,7 +57,13 @@ function decodeItem(body: ItemBody): { encryptedData: Buffer; nonce: Buffer } {
   };
 }
 
-const NONCE_REUSE_MESSAGE = 'nonce has already been used; encrypt with a fresh random nonce';
+export const NONCE_REUSE_MESSAGE = 'nonce has already been used; encrypt with a fresh random nonce';
+const NONCE_CONSTRAINT = 'vault_items_nonce_key';
+
+const staleRevision = (current: number) =>
+  conflict('This item was changed elsewhere since it was loaded. Reload the vault and try again.', {
+    current_revision: current,
+  });
 
 /**
  * Vault routes. The server treats every payload as opaque ciphertext: it
@@ -92,64 +110,79 @@ export function registerVaultRoutes(
     },
   );
 
-  app.post<{ Body: ItemBody }>(
+  // The client picks the id (it's bound into the ciphertext) and starts at revision 1.
+  app.post<{ Body: CreateItemBody }>(
     '/vault-items',
     {
       onRequest: authenticate,
-      schema: { body: itemBodySchema, response: { 201: itemResponseSchema } },
+      schema: { body: createItemBodySchema, response: { 201: itemResponseSchema } },
     },
     async (request, reply) => {
-      const { encryptedData, nonce } = decodeItem(request.body);
+      const { encryptedData, nonce } = decodeCiphertext(request.body);
       try {
         const { rows } = await pool.query<ItemRow>(
-          `INSERT INTO vault_items (user_id, encrypted_data, nonce) VALUES ($1, $2, $3)
+          `INSERT INTO vault_items (id, user_id, revision, encrypted_data, nonce)
+           VALUES ($1, $2, $3, $4, $5)
            RETURNING ${ITEM_COLUMNS}`,
-          [request.userId, encryptedData, nonce],
+          [request.body.id, request.userId, request.body.revision, encryptedData, nonce],
         );
         reply.code(201);
         return toItemResponse(rows[0]!);
       } catch (error) {
-        if (isUniqueViolation(error)) throw conflict(NONCE_REUSE_MESSAGE);
+        if (isUniqueViolation(error, NONCE_CONSTRAINT)) throw conflict(NONCE_REUSE_MESSAGE);
+        if (isUniqueViolation(error)) throw conflict('An item with this id already exists');
         throw error;
       }
     },
   );
 
-  app.put<{ Params: { id: string }; Body: ItemBody }>(
+  // Accepts only the next revision, so a stale client can't overwrite a newer
+  // save, and a revision number is never reused for different content.
+  app.put<{ Params: { id: string }; Body: UpdateItemBody }>(
     '/vault-items/:id',
     {
       onRequest: authenticate,
       schema: {
         params: itemIdParamsSchema,
-        body: itemBodySchema,
+        body: updateItemBodySchema,
         response: { 200: itemResponseSchema },
       },
     },
     async (request) => {
-      const { encryptedData, nonce } = decodeItem(request.body);
+      const { encryptedData, nonce } = decodeCiphertext(request.body);
+      const { revision } = request.body;
       let rows: ItemRow[];
       try {
-        // Reject re-encrypting new content under the item's current nonce.
-        // Resending the identical (ciphertext, nonce) pair is a harmless retry.
+        // Also rejects re-encrypting new content under the item's current nonce.
         ({ rows } = await pool.query<ItemRow>(
-          `UPDATE vault_items SET encrypted_data = $3, nonce = $4, updated_at = now()
-           WHERE id = $1 AND user_id = $2 AND (nonce <> $4 OR encrypted_data = $3)
+          `UPDATE vault_items
+           SET encrypted_data = $3, nonce = $4, revision = $5, updated_at = now()
+           WHERE id = $1 AND user_id = $2 AND revision = $5 - 1 AND nonce <> $4
            RETURNING ${ITEM_COLUMNS}`,
-          [request.params.id, request.userId, encryptedData, nonce],
+          [request.params.id, request.userId, encryptedData, nonce, revision],
         ));
       } catch (error) {
-        if (isUniqueViolation(error)) throw conflict(NONCE_REUSE_MESSAGE);
+        if (isUniqueViolation(error, NONCE_CONSTRAINT)) throw conflict(NONCE_REUSE_MESSAGE);
         throw error;
       }
       const row = rows[0];
       if (row) return toItemResponse(row);
 
-      const { rowCount } = await pool.query(
-        'SELECT 1 FROM vault_items WHERE id = $1 AND user_id = $2',
+      const { rows: current } = await pool.query<ItemRow>(
+        `SELECT ${ITEM_COLUMNS} FROM vault_items WHERE id = $1 AND user_id = $2`,
         [request.params.id, request.userId],
       );
+      const existing = current[0];
       // Other users' items are indistinguishable from missing ones.
-      throw rowCount ? conflict(NONCE_REUSE_MESSAGE) : notFound();
+      if (!existing) throw notFound();
+      const isRetry =
+        existing.revision === revision &&
+        existing.nonce.equals(nonce) &&
+        existing.encrypted_data.equals(encryptedData);
+      // Resending the identical save is a harmless retry (e.g. after a lost response).
+      if (isRetry) return toItemResponse(existing);
+      if (existing.nonce.equals(nonce)) throw conflict(NONCE_REUSE_MESSAGE);
+      throw staleRevision(existing.revision);
     },
   );
 

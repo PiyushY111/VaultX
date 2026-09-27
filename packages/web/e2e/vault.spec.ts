@@ -110,3 +110,63 @@ test('auto-lock clears the vault after inactivity', async ({ page }) => {
   await page.getByRole('button', { name: 'Unlock' }).click();
   await expect(page.getByRole('listitem', { name: ITEM.site })).toBeVisible();
 });
+
+test('derives keys in a Web Worker, allowed by the production CSP', async ({ page }) => {
+  const workers: string[] = [];
+  page.on('worker', (worker) => workers.push(worker.url()));
+  const { errors } = watch(page);
+  await signUp(page, uniqueAccount());
+  expect(workers.some((url) => url.includes('kdf.worker'))).toBe(true);
+  expect(errors).toEqual([]);
+});
+
+test('changes the master password, then only the new one unlocks', async ({ page }) => {
+  const account = uniqueAccount();
+  const newPassword = `${account.password}-ROTATED`;
+  const { requests } = watch(page);
+  await signUp(page, account);
+  await addItem(page);
+
+  await page.getByRole('button', { name: 'Security' }).click();
+  const sessions = page.getByRole('region', { name: 'Sessions' });
+  await expect(sessions.getByRole('listitem', { name: /^Web vault/ })).toContainText(
+    'This session',
+  );
+
+  const form = page.getByRole('form', { name: 'Change master password' });
+  await form.getByLabel('Current master password').fill(account.password);
+  await form.getByLabel('New master password', { exact: true }).fill(newPassword);
+  await form.getByLabel('Confirm new master password').fill(newPassword);
+  await form.getByRole('button', { name: 'Change master password' }).click();
+  await expect(form.getByRole('status')).toContainText('Master password changed');
+
+  await page.getByRole('button', { name: 'Lock now' }).click();
+  await page.getByLabel('Master password').fill(account.password);
+  await page.getByRole('button', { name: 'Unlock' }).click();
+  await expect(page.getByRole('alert')).toContainText('Incorrect email or master password');
+  await page.getByLabel('Master password').fill(newPassword);
+  await page.getByRole('button', { name: 'Unlock' }).click();
+  await expect(page.getByRole('listitem', { name: ITEM.site })).toBeVisible();
+
+  for (const request of requests) {
+    for (const secret of [account.password, newPassword, ...Object.values(ITEM)]) {
+      expect(request, `leaked "${secret}"`).not.toContain(secret);
+    }
+  }
+});
+
+test('clears a copied password from the clipboard after 30 seconds', async ({ page, context }) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+  await page.clock.install();
+  await signUp(page, uniqueAccount());
+  await addItem(page);
+  const readClipboard = () => page.evaluate(() => navigator.clipboard.readText());
+
+  await page
+    .getByRole('listitem', { name: ITEM.site })
+    .getByRole('button', { name: 'Copy' })
+    .click();
+  await expect.poll(readClipboard).toBe(ITEM.password);
+  await page.clock.fastForward('00:31');
+  await expect.poll(readClipboard).toBe('');
+});

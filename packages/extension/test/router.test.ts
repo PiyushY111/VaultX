@@ -72,11 +72,13 @@ describe('handleMessage authorization', () => {
     deps = {
       vault: new Vault({
         session: new MemoryStore(),
+        local: new MemoryStore(),
         fetch: server.fetch,
         now: () => Date.now(),
         getSettings: async () => ({ ...DEFAULT_SETTINGS, serverUrl: SERVER }),
       }),
       settingsStore,
+      clipboard: { scheduleClear: vi.fn(async () => {}) },
       tabs: { getUrl: vi.fn(), sendFill: vi.fn(), notifyUnlocked: vi.fn() },
     };
   });
@@ -136,6 +138,14 @@ describe('handleMessage authorization', () => {
     expect(deps.tabs.notifyUnlocked).toHaveBeenCalled();
     const state = await handleMessage({ type: 'getState' }, popup, deps);
     expect(state).toMatchObject({ ok: true, data: { status: 'unlocked', email: 'a@example.com' } });
+  });
+
+  it('lets the popup schedule clearing a copied password', async () => {
+    expect(await handleMessage({ type: 'scheduleClipboardClear' }, popup, deps)).toEqual({
+      ok: true,
+      data: null,
+    });
+    expect(deps.clipboard.scheduleClear).toHaveBeenCalledOnce();
   });
 
   it('validates settings and locks when the server changes', async () => {

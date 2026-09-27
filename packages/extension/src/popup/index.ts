@@ -269,9 +269,11 @@ async function renderVault(state: VaultState): Promise<void> {
 function itemRow(item: PopupItem, status: HTMLElement): HTMLLIElement {
   const secret = h('code', { class: 'secret' }, '••••••••');
   let revealed = false;
-  const copy = async (value: string, button: HTMLButtonElement) => {
+  const copy = async (value: string, button: HTMLButtonElement, secret = false) => {
     try {
       await navigator.clipboard.writeText(value);
+      // The popup usually closes before 30 seconds pass, so the background clears it.
+      if (secret) await send({ type: 'scheduleClipboardClear' });
       button.textContent = 'Copied';
       setTimeout(() => (button.textContent = button.dataset.label ?? 'Copy'), 1500);
     } catch {
@@ -289,7 +291,8 @@ function itemRow(item: PopupItem, status: HTMLElement): HTMLLIElement {
     { type: 'button', class: 'btn btn-quiet', 'data-label': 'Copy password' },
     'Copy password',
   );
-  copyPassword.addEventListener('click', () => void copy(item.password, copyPassword));
+  copyPassword.addEventListener('click', () => void copy(item.password, copyPassword, true));
+  copyPassword.title = 'Cleared from the clipboard after 30 seconds';
 
   return h(
     'li',

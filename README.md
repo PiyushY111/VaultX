@@ -11,16 +11,20 @@ vault, stay on your devices:
   separate _auth hash_ used only to log in. The server can check that auth hash
   but can't decrypt anything with it.
 - **Every item is encrypted on the client** with XChaCha20-Poly1305 under a
-  random vault key, with a fresh nonce on every save.
+  random vault key, with a fresh nonce on every save. Each ciphertext is
+  bound to its item id and revision, so the server can't swap items or pass
+  off old copies as current.
+- **You can change your master password**, which also rotates the vault key
+  and re-encrypts every item, and see or end every session.
 - **The server stores opaque blobs.** Integration tests scan every raw
   database row to confirm no plaintext or key material is ever stored.
 
-| Package                                    | What it is                                                                                                                 |
-| ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------- |
-| [`packages/crypto`](packages/crypto)       | All cryptography (libsodium): Argon2id, HKDF, XChaCha20-Poly1305. Known-answer tests against independent implementations.  |
-| [`packages/server`](packages/server)       | Fastify + Postgres API. Stores ciphertext, verifies auth hashes in constant time, throttles logins per IP and per account. |
-| [`packages/web`](packages/web)             | React + Vite web vault: signup, login, searchable vault, item editor, password generator, auto-lock.                       |
-| [`packages/extension`](packages/extension) | Manifest V3 Chrome extension: popup vault, click-to-autofill, "save this password?" prompts.                               |
+| Package                                    | What it is                                                                                                                                                 |
+| ------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`packages/crypto`](packages/crypto)       | All cryptography (libsodium): Argon2id, HKDF, XChaCha20-Poly1305. Known-answer tests against independent implementations.                                  |
+| [`packages/server`](packages/server)       | Fastify + Postgres API. Stores ciphertext, verifies auth hashes in constant time, throttles logins per IP and per account.                                 |
+| [`packages/web`](packages/web)             | React + Vite web vault: signup, login, searchable vault, item editor, password generator, strength meter, auto-lock, master password change, session list. |
+| [`packages/extension`](packages/extension) | Manifest V3 Chrome extension: popup vault, click-to-autofill, "save this password?" prompts, clipboard clearing.                                           |
 
 - **How it works:** [DESIGN.md](DESIGN.md) (key hierarchy, protocols, data model).
 - **What it protects against, and what it doesn't:** [THREAT_MODEL.md](THREAT_MODEL.md).
@@ -128,9 +132,7 @@ cryptographic design or the trust model, not just add a feature.
 
 Other known gaps are documented in THREAT_MODEL.md and not yet scheduled:
 
-- master password change and key rotation
-- logout / session revocation
 - two-factor authentication
-- binding item ciphertext to item ID and version (rollback protection)
-- clipboard clearing
-- running Argon2id in a Web Worker
+- a signed vault manifest, so a device that has never seen the vault can
+  detect a stale copy (today rollback is caught only on devices that have
+  seen a newer revision)

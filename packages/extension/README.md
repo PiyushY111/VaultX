@@ -26,14 +26,21 @@ After rebuilding, click the reload icon on the extension's card.
 | `src/background` | Service worker               | Vault key, session token, decrypted items; all API calls          |
 | `src/popup`      | Extension page               | Decrypted items (to list them), via messages to the background    |
 | `src/content`    | Every https page (top frame) | Usernames of matching items; one credential after a click on Fill |
+| `src/offscreen`  | Offscreen document (briefly) | Nothing: it only overwrites the clipboard with an empty string    |
 
 - **Vault key storage:** memory plus `chrome.storage.session` (memory-only,
   cleared on browser close, not readable by content scripts), so the vault
   survives MV3 service-worker restarts. Nothing secret is in
-  `chrome.storage.local`.
+  `chrome.storage.local` (it holds settings, the last email, and the revision
+  ledger: item ids and revision numbers).
 - **Locking:** after 15 minutes without using the extension (configurable:
   5/15/30/60), when the OS screen locks, when the server rejects the session,
-  on browser restart, or on demand.
+  on browser restart, or on demand. Locking also ends the server session.
+- **Clipboard:** a password copied from the popup is cleared after 30 seconds,
+  or when the vault locks. The popup is usually closed by then, so the
+  background schedules it with `chrome.alarms` and opens an offscreen
+  document to write the clipboard (permissions: `offscreen`,
+  `clipboardWrite`; neither shows an install warning).
 - **Authorization:** the background checks every message's browser-provided
   sender. Only the popup can unlock or list items; content scripts can only ask
   about their own tab's URL. See the trust-boundary comment at the top of

@@ -1,8 +1,13 @@
 import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import sodium from 'libsodium-wrappers-sumo';
 import { installFakeServer, type FakeServer } from '../test/fakeServer';
 import { App } from './App';
+import { toBase64 } from './lib/base64';
+import { CLIPBOARD_CLEAR_MS } from './lib/clipboard';
+import { serializeItem } from './vault/items';
+import { revisionStorageKey } from './vault/revisionLedger';
 
 // Capture every vault key the app holds so the test can check they get wiped.
 const vaultKeys = vi.hoisted(() => [] as Uint8Array[]);
@@ -101,8 +106,11 @@ describe('signup → add item → lock → unlock', () => {
     expect(document.body.innerHTML).not.toContain(ITEM.password);
     for (const key of vaultKeys) expect(key.every((byte) => byte === 0)).toBe(true);
 
-    // Nothing sensitive was persisted to browser storage.
-    expect(Object.keys(localStorage)).toEqual([]);
+    // Nothing sensitive was persisted to browser storage: only the revision
+    // ledger, which holds item ids and revision numbers.
+    expect(Object.keys(localStorage)).toEqual([revisionStorageKey(EMAIL)]);
+    const ledger = JSON.parse(localStorage.getItem(revisionStorageKey(EMAIL))!);
+    expect(Object.entries(ledger)).toEqual([[stored[0]!.id, 1]]);
     expect(Object.keys(sessionStorage)).toEqual([]);
 
     // Wrong password stays locked.
@@ -191,5 +199,195 @@ describe('session expiry', () => {
       expect(screen.getByRole('heading', { name: 'Vault locked' })).toBeInTheDocument(),
     );
     expect(screen.getByRole('status')).toHaveTextContent('session expired');
+  });
+});
+
+describe('master password strength', () => {
+  it('refuses a weak master password at signup, before any network or crypto work', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole('button', { name: 'Create an account' }));
+    await user.type(screen.getByLabelText('Email'), EMAIL);
+    await user.type(screen.getByLabelText('Master password'), 'password1234');
+    await user.type(screen.getByLabelText('Confirm master password'), 'password1234');
+    const meter = await screen.findByRole(
+      'meter',
+      { name: 'Password strength' },
+      { timeout: 5_000 },
+    );
+    await waitFor(() => expect(Number(meter.getAttribute('aria-valuenow'))).toBeLessThan(3));
+    await user.click(screen.getByRole('button', { name: 'Create account' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(/rated at least “Strong”/);
+    expect(server.requests).toHaveLength(0);
+  });
+});
+
+describe('clipboard', () => {
+  // user-event's clipboard stub throws when reading an empty clipboard.
+  const readClipboard = () => navigator.clipboard.readText().catch(() => '');
+
+  it('clears a copied password after 30 seconds, and immediately on lock', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    await signUpAndAddItem(user);
+    const row = screen.getByRole('listitem', { name: ITEM.site });
+
+    await user.click(within(row).getByRole('button', { name: 'Copy' }));
+    expect(await readClipboard()).toBe(ITEM.password);
+    await act(() => vi.advanceTimersByTimeAsync(CLIPBOARD_CLEAR_MS));
+    expect(await readClipboard()).toBe('');
+
+    await user.click(within(row).getByRole('button', { name: 'Copy' }));
+    expect(await readClipboard()).toBe(ITEM.password);
+    await user.click(screen.getByRole('button', { name: 'Lock now' }));
+    await waitFor(async () => expect(await readClipboard()).toBe(''));
+  });
+});
+
+describe('sessions', () => {
+  it('ends the server session on lock, and lists and signs out sessions from Security', async () => {
+    const user = userEvent.setup();
+    await signUpAndAddItem(user);
+    await user.click(screen.getByRole('button', { name: 'Lock now' }));
+    await waitFor(() => expect(server.sessions.size).toBe(0));
+    await unlock(user, PASSWORD);
+    await screen.findByRole('listitem', { name: ITEM.site }, { timeout: 10_000 });
+
+    await user.click(screen.getByRole('button', { name: 'Security' }));
+    const sessions = await screen.findByRole('region', { name: 'Sessions' });
+    const current = await within(sessions).findByRole('listitem', {
+      name: 'Web vault · Chrome on macOS',
+    });
+    expect(within(current).getByText('This session')).toBeInTheDocument();
+
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    await user.click(within(sessions).getByRole('button', { name: 'Sign out everywhere' }));
+    expect(await screen.findByRole('heading', { name: 'Log in' })).toBeInTheDocument();
+    expect(server.sessions.size).toBe(0);
+  });
+});
+
+describe('change master password', () => {
+  const NEW_PASSWORD = 'NEW-master-password-orbit-lantern-58';
+
+  it('re-encrypts the vault so only the new password opens it', async () => {
+    const user = userEvent.setup();
+    await signUpAndAddItem(user);
+    const before = { ...[...server.items.values()][0]! };
+
+    await user.click(screen.getByRole('button', { name: 'Security' }));
+    const form = screen.getByRole('form', { name: 'Change master password' });
+    await user.type(within(form).getByLabelText('Current master password'), PASSWORD);
+    await user.type(within(form).getByLabelText('New master password'), NEW_PASSWORD);
+    await user.type(within(form).getByLabelText('Confirm new master password'), NEW_PASSWORD);
+    await user.click(within(form).getByRole('button', { name: 'Change master password' }));
+    expect(await within(form).findByRole('status', {}, { timeout: 20_000 })).toHaveTextContent(
+      'Master password changed',
+    );
+
+    const after = [...server.items.values()][0]!;
+    expect(after.revision).toBe(before.revision + 1);
+    expect(after.encrypted_data).not.toBe(before.encrypted_data);
+    const traffic = server.requests.map((r) => r.body).join('\n');
+    for (const value of [PASSWORD, NEW_PASSWORD, ITEM.password])
+      expect(traffic).not.toContain(value);
+
+    await user.click(screen.getByRole('button', { name: 'Lock now' }));
+    await unlock(user, PASSWORD);
+    expect(await screen.findByRole('alert', {}, { timeout: 10_000 })).toHaveTextContent(
+      'Incorrect email or master password',
+    );
+    await unlock(user, NEW_PASSWORD);
+    expect(
+      await screen.findByRole('listitem', { name: ITEM.site }, { timeout: 10_000 }),
+    ).toBeInTheDocument();
+  });
+
+  it('says so when the current password is wrong', async () => {
+    const user = userEvent.setup();
+    await signUpAndAddItem(user);
+    await user.click(screen.getByRole('button', { name: 'Security' }));
+    const form = screen.getByRole('form', { name: 'Change master password' });
+    await user.type(within(form).getByLabelText('Current master password'), 'not-my-password-1');
+    await user.type(within(form).getByLabelText('New master password'), NEW_PASSWORD);
+    await user.type(within(form).getByLabelText('Confirm new master password'), NEW_PASSWORD);
+    await user.click(within(form).getByRole('button', { name: 'Change master password' }));
+    expect(await within(form).findByRole('alert', {}, { timeout: 10_000 })).toHaveTextContent(
+      'Current master password is incorrect',
+    );
+    expect(server.requests.some((r) => r.url === '/api/account/password')).toBe(false);
+  });
+});
+
+describe('item revisions', () => {
+  it('hides an item the server has rolled back to an older revision', async () => {
+    const user = userEvent.setup();
+    await signUpAndAddItem(user);
+    const original = { ...[...server.items.values()][0]! };
+
+    const row = screen.getByRole('listitem', { name: ITEM.site });
+    await user.click(within(row).getByRole('button', { name: 'Edit' }));
+    const form = screen.getByRole('form', { name: 'Edit item' });
+    await user.clear(within(form).getByLabelText('Password'));
+    await user.type(within(form).getByLabelText('Password'), 'ROTATED-password-777');
+    await user.click(within(form).getByRole('button', { name: 'Save' }));
+    await screen.findByRole('listitem', { name: ITEM.site });
+
+    // A malicious server restores the old (genuine) ciphertext of revision 1.
+    server.items.set(original.id, original);
+    await user.click(screen.getByRole('button', { name: 'Lock now' }));
+    await unlock(user, PASSWORD);
+    expect(await screen.findByRole('alert', {}, { timeout: 10_000 })).toHaveTextContent(
+      /older than a version this browser has already seen/,
+    );
+    expect(screen.queryByRole('listitem', { name: ITEM.site })).not.toBeInTheDocument();
+  });
+
+  it('upgrades an item saved before revisions existed', async () => {
+    const user = userEvent.setup();
+    await signUpAndAddItem(user);
+    const vaultKey = vaultKeys[0]!.slice();
+    await user.click(screen.getByRole('button', { name: 'Lock now' }));
+
+    await sodium.ready;
+    const nonce = sodium.randombytes_buf(24);
+    const legacyItem = { site: 'legacy.example.com', username: 'old', password: 'pw', notes: '' };
+    const id = crypto.randomUUID();
+    server.items.set(id, {
+      id,
+      owner: 'alice@example.com',
+      revision: 0,
+      encrypted_data: toBase64(
+        sodium.crypto_aead_xchacha20poly1305_ietf_encrypt(
+          serializeItem(legacyItem),
+          'password-manager:v1:item',
+          null,
+          nonce,
+          vaultKey,
+        ),
+      ),
+      nonce: toBase64(nonce),
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+
+    await unlock(user, PASSWORD);
+    expect(
+      await screen.findByRole('listitem', { name: legacyItem.site }, { timeout: 10_000 }),
+    ).toBeInTheDocument();
+    await waitFor(() => expect(server.items.get(id)!.revision).toBe(1));
+  });
+
+  it('reloads instead of overwriting an item that changed elsewhere', async () => {
+    const user = userEvent.setup();
+    await signUpAndAddItem(user);
+    const row = screen.getByRole('listitem', { name: ITEM.site });
+    await user.click(within(row).getByRole('button', { name: 'Edit' }));
+    // Another device saves revision 2 in the meantime.
+    [...server.items.values()][0]!.revision = 2;
+    const form = screen.getByRole('form', { name: 'Edit item' });
+    await user.type(within(form).getByLabelText('Notes'), ' (edited)');
+    await user.click(within(form).getByRole('button', { name: 'Save' }));
+    expect(await within(form).findByRole('alert')).toHaveTextContent(/changed elsewhere/);
   });
 });

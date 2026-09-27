@@ -1,4 +1,5 @@
 import type { FillCredentialMessage } from '../shared/messages';
+import { clipboardClearer } from './clipboard';
 import { classifySender, handleMessage, type RouterDeps } from './router';
 import { loadSettings } from './settings';
 import { chromeStore } from './storage';
@@ -11,14 +12,17 @@ const settingsStore = chromeStore(chrome.storage.local);
 
 const vault = new Vault({
   session: sessionStore,
+  local: settingsStore,
   fetch: (input, init) => fetch(input, init),
   now: () => Date.now(),
   getSettings: () => loadSettings(settingsStore),
+  onLock: () => clipboardClearer.clearIfPending(),
 });
 
 const deps: RouterDeps = {
   vault,
   settingsStore,
+  clipboard: clipboardClearer,
   tabs: {
     async getUrl(tabId) {
       try {
@@ -62,6 +66,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 void chrome.alarms.create(AUTO_LOCK_ALARM, { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === AUTO_LOCK_ALARM) void vault.enforceAutoLock();
+  clipboardClearer.onAlarm(alarm);
 });
 
 // Lock immediately when the OS screen locks.

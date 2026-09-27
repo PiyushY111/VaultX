@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import {
   MIN_KDF_PARAMS,
   deriveKeys,
@@ -8,6 +8,7 @@ import {
   generateSalt,
   generateVaultKey,
   type EncryptedPayload,
+  type ItemBinding,
   type KdfParams,
 } from '@password-manager/crypto';
 import type { FastifyInstance } from 'fastify';
@@ -29,7 +30,10 @@ export interface TestContext {
 }
 
 /** A fresh, migrated database and app instance, isolated from other test files. */
-export async function createTestContext(overrides: Partial<Config> = {}): Promise<TestContext> {
+export async function createTestContext(
+  overrides: Partial<Config> = {},
+  { migrations = true } = {},
+): Promise<TestContext> {
   const adminUrl = inject('adminDatabaseUrl');
   const dbName = `test_${randomBytes(8).toString('hex')}`;
   const admin = new pg.Client({ connectionString: adminUrl });
@@ -40,7 +44,7 @@ export async function createTestContext(overrides: Partial<Config> = {}): Promis
   const url = new URL(adminUrl);
   url.pathname = `/${dbName}`;
   const pool = new pg.Pool({ connectionString: url.toString() });
-  await migrate(pool);
+  if (migrations) await migrate(pool);
 
   const config: Config = {
     host: '127.0.0.1',
@@ -121,11 +125,20 @@ export async function signup(app: FastifyInstance, user: ClientUser) {
   return app.inject({ method: 'POST', url: '/signup', payload: signupPayload(user) });
 }
 
-export async function login(app: FastifyInstance, user: ClientUser): Promise<string> {
+export async function login(
+  app: FastifyInstance,
+  user: ClientUser,
+  extra: { client?: string; headers?: Record<string, string> } = {},
+): Promise<string> {
   const response = await app.inject({
     method: 'POST',
     url: '/login',
-    payload: { email: user.email, auth_hash: b64(user.authHash) },
+    headers: extra.headers ?? {},
+    payload: {
+      email: user.email,
+      auth_hash: b64(user.authHash),
+      ...(extra.client && { client: extra.client }),
+    },
   });
   expect(response.statusCode, response.body).toBe(200);
   return response.json<{ token: string }>().token;
@@ -144,15 +157,34 @@ export async function registerAndLogin(
 
 export interface ItemResponse {
   id: string;
+  revision: number;
   encrypted_data: string;
   nonce: string;
   created_at: string;
   updated_at: string;
 }
 
-export async function encryptedItemPayload(plaintext: string, vaultKey: Uint8Array) {
-  const { ciphertext, nonce } = await encryptItem(plaintext, vaultKey);
+/** Ciphertext and nonce for an item, bound to its id and revision as a real client does. */
+export async function encryptedItemPayload(
+  plaintext: string,
+  vaultKey: Uint8Array,
+  binding: ItemBinding,
+) {
+  const { ciphertext, nonce } = await encryptItem(plaintext, vaultKey, binding);
   return { encrypted_data: b64(ciphertext), nonce: b64(nonce) };
+}
+
+/** A PUT body saving `plaintext` as the item's next revision. */
+export async function updatePayload(
+  plaintext: string,
+  vaultKey: Uint8Array,
+  item: { id: string; revision: number },
+) {
+  const revision = item.revision + 1;
+  return {
+    revision,
+    ...(await encryptedItemPayload(plaintext, vaultKey, { itemId: item.id, revision })),
+  };
 }
 
 export async function createItem(
@@ -161,15 +193,25 @@ export async function createItem(
   vaultKey: Uint8Array,
   plaintext: string,
 ): Promise<ItemResponse> {
+  const id = randomUUID();
   const response = await app.inject({
     method: 'POST',
     url: '/vault-items',
     headers: bearer(token),
-    payload: await encryptedItemPayload(plaintext, vaultKey),
+    payload: {
+      id,
+      revision: 1,
+      ...(await encryptedItemPayload(plaintext, vaultKey, { itemId: id, revision: 1 })),
+    },
   });
   expect(response.statusCode, response.body).toBe(201);
   return response.json<ItemResponse>();
 }
+
+export const bindingOf = (item: { id: string; revision: number }): ItemBinding => ({
+  itemId: item.id,
+  revision: item.revision,
+});
 
 // ---------------------------------------------------------------------------
 // Raw-row scanning

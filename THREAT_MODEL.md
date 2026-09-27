@@ -73,7 +73,11 @@ all traffic that reaches the server.
   (ciphertext length = plaintext length + 16), timestamps and access
   patterns are all visible.
 - **Availability and integrity of the vault as a whole.** The operator can
-  delete items, refuse writes, or serve an old copy of the vault (see §7).
+  delete or withhold items, refuse writes, or serve an old copy of the vault
+  to a device that hasn't seen a newer one (see §7). Swapping items or
+  passing off old ciphertexts as current is detected.
+- **Session metadata.** The session list stores each login's user agent and
+  when it was last used.
 
 ## 2. Database breach
 
@@ -107,8 +111,16 @@ control the running server.
 - **Memory-hard KDF:** Argon2id at 64 MiB and 3 passes by default makes each
   guess expensive, especially on GPUs and ASICs. Per-user salts prevent
   precomputation and cross-user attacks.
-- **Minimum length:** the web client requires at least 12 characters at
-  signup and a confirmation field (a typo means permanent lockout).
+- **Minimum length and strength:** the web client requires at least 12
+  characters, a zxcvbn score of at least 3 ("Strong") at signup and on
+  password change, and a confirmation field (a typo means permanent
+  lockout). zxcvbn (via zxcvbn-ts) runs locally and is given the email as
+  context, so passwords built from common words, keyboard patterns, dates or
+  the user's own address are refused. Item passwords get the same meter as
+  advice only.
+- **Master password change** re-derives everything from a new password and
+  rotates the vault key, re-encrypting every item (see §7 for why rotation,
+  not just re-wrapping). Other sessions are ended.
 - **Online guessing is throttled on two levels:**
   - Per IP: 10 login requests per minute.
   - Per account: 5 failed logins per 15 minutes. Further attempts get a clear
@@ -122,8 +134,13 @@ control the running server.
   and password entropy. A 12-character password drawn from a small space is
   still guessable.
 - **The server can't enforce password strength.** It never sees the password,
-  so the 12-character minimum is client-side only, and a modified client can
-  bypass it. There is no strength estimator (e.g. zxcvbn) yet.
+  so the length and zxcvbn checks are client-side only, and a modified
+  client can bypass them. zxcvbn is an estimate: a password it rates
+  "Strong" can still be weak if it's reused or was leaked elsewhere.
+- **Changing the password doesn't protect data an attacker already has.** If
+  they captured the old wrapped vault key or item ciphertexts, the old
+  password still opens those copies; rotation protects everything saved
+  afterwards.
 - **No second factor.** A captured auth hash, or a guessed password, is
   enough to log in. (A second factor would protect server access to the
   ciphertext, not the offline attack.)
@@ -132,8 +149,6 @@ control the running server.
   inherent trade-off of per-account limits. The lockout is short, never
   permanent, and explained to the user. Allowlisting known devices would
   soften it and is not implemented.
-- **No password change or key rotation** in v1, so a password believed
-  compromised can't be rotated yet.
 
 ## 4. Stolen or unlocked device
 
@@ -152,6 +167,13 @@ control the running server.
   - Locking zeroes the vault key, drops the session token, and discards
     decrypted items (web: unmounts the vault view; extension: clears the
     cache and session storage).
+- **Locking and logging out end the server session** (`POST /logout`), so a
+  token copied from memory stops working. The Security page lists every
+  session with its client, browser and last use, and can end one or all of
+  them.
+- **Copied passwords are cleared from the clipboard** after 30 seconds, and
+  at once when the vault locks. In the extension the background worker does
+  it (the popup is usually closed by then).
 - **Unlocking requires the master password** and runs the full login again.
 
 **Not solved**
@@ -164,11 +186,16 @@ control the running server.
   memory, swap or crash dumps.
 - **Malware, keyloggers and memory-scraping tools** on the device defeat all
   of this.
-- **Server sessions outlive a local lock.** Locking discards the client's
-  token, but the server-side session stays valid until it expires (24 h);
-  there's no logout or revocation endpoint yet. The token grants ciphertext
-  only.
-- **The clipboard isn't cleared** after copying a password.
+- **Ending a session is best effort.** If the device is offline when it
+  locks, the server session stays valid until it expires (24 h). The token
+  grants ciphertext only.
+- **Clipboard clearing has limits.** Browsers don't let a page read the
+  clipboard without a prompt, so the clear is unconditional: it can wipe
+  something copied in another app in the meantime (the web vault skips the
+  clear if you copy something else in the page). OS clipboard history or
+  sync (Windows clipboard history, Universal Clipboard, clipboard managers)
+  may keep their own copy. If the browser is closed within 30 seconds, the
+  password stays on the clipboard.
 
 ## 5. Malicious browser extension environment
 
@@ -282,28 +309,42 @@ Replaying or rearranging previously valid ciphertexts or credentials.
     be replayed.
   - Sessions expire after 24 hours.
   - Login attempts are throttled.
+  - Sessions can be ended from any other session, and a password change
+    ends them all.
+- **Items are bound to their id and revision.** Both are in each item's AAD,
+  so the server can't **swap** two items' contents or relabel an old
+  ciphertext as a **newer revision**: decryption fails, and the web vault
+  reports the item as tampered with. The server accepts only the next
+  revision, so revision numbers are never reused.
+- **Rollback is caught on devices that have seen the item.** Each client
+  remembers the highest revision it has seen per item (and which items it
+  deleted). An item served at an older revision, or a deleted item that
+  reappears, is hidden and reported as rolled back.
+- **Password change rotates the vault key**, so an attacker who unwrapped
+  the old vault key with a stolen password can't read anything saved
+  afterwards, and can't forge new items.
 
 **Not solved**
 
-- **Rollback and swapping by the server (or anyone with database write
-  access).** Item ciphertexts aren't bound to their item ID, owner, or a
-  version, and there is no signed manifest of the vault. So an attacker can,
-  without the client noticing:
-  - replay an **older version** of an item (e.g. restore a rotated-away
-    password)
-  - **swap the contents of two items** belonging to the same user (e.g. make
-    the `bank.example.com` entry decrypt to the `github.com` entry's data)
-  - **delete** items, or serve an entire **stale copy** of the vault
-
-  They can't move items between users (each vault has its own key) or create
-  new valid items. Fixing this needs the item ID and a version counter in the
-  AAD, plus a client-verifiable vault manifest or per-user monotonic version.
-
+- **Rollback on a device that has never seen the vault.** The revision
+  ledger lives in each browser. A new device, a cleared browser profile, or
+  a private window has no ledger, so the server can serve it an old but
+  genuine revision of any item, or a whole stale copy of the vault, without
+  it noticing. A signed, client-verifiable vault manifest would close this;
+  it isn't implemented.
+- **Withholding items.** The server can hide items (or refuse writes).
+  Clients can't tell an item the server withholds from one deleted on
+  another device. A deleted item that reappears is caught by the ledger on
+  devices that saw it deleted.
+- **Legacy items (revision 0)** from before binding use the old, unbound
+  format until a client re-saves them. The web vault does so on load; until
+  then, or on a device without a ledger, they can be swapped or rolled back
+  as before.
 - **Auth-hash replay.** A captured auth hash (from an unencrypted connection
   or a compromised client) works as a login credential until the password
-  changes, which v1 can't do. It still doesn't decrypt anything.
-- **Session-token replay** works until the token expires; there's no
-  revocation.
+  is changed. It still doesn't decrypt anything.
+- **Session-token replay** works until the token expires or the session is
+  ended (log out, lock, "sign out everywhere", or a password change).
 
 ---
 

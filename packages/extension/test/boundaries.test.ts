@@ -66,7 +66,15 @@ describe('manifest', async () => {
   });
 
   it('requests only the permissions it uses', () => {
-    expect(manifest.permissions.sort()).toEqual(['alarms', 'idle', 'storage']);
+    // offscreen + clipboardWrite: clearing a copied password (background/clipboard.ts).
+    // Neither shows an install warning; clipboardRead (which would) is not requested.
+    expect(manifest.permissions.sort()).toEqual([
+      'alarms',
+      'clipboardWrite',
+      'idle',
+      'offscreen',
+      'storage',
+    ]);
   });
 
   it('allows WebAssembly but never eval or remote scripts', () => {

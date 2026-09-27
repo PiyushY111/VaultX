@@ -1,6 +1,7 @@
 import { decryptItem, encryptItem } from '@password-manager/crypto';
 import { fromBase64, toBase64 } from '../shared/base64';
-import type { EncryptedItemPayload, ItemResponse } from './api';
+import type { ItemResponse, ItemRevisionPayload } from './api';
+import type { RevisionLedger } from './revisions';
 
 // The encrypted item format is shared with packages/web (test/interop.test.ts
 // checks the two stay compatible).
@@ -14,6 +15,8 @@ export interface VaultItemData {
 
 export interface VaultItem extends VaultItemData {
   id: string;
+  /** The revision this copy was saved as; the next save must be revision + 1. */
+  revision: number;
 }
 
 const ITEM_FORMAT_VERSION = 1;
@@ -41,32 +44,46 @@ export function parseItem(json: string): VaultItemData {
   };
 }
 
+/** Encrypts one revision of an item, bound to its id and revision number. */
 export async function encryptVaultItem(
   data: VaultItemData,
   vaultKey: Uint8Array,
-): Promise<EncryptedItemPayload> {
-  const { ciphertext, nonce } = await encryptItem(serializeItem(data), vaultKey);
-  return { encrypted_data: toBase64(ciphertext), nonce: toBase64(nonce) };
+  id: string,
+  revision: number,
+): Promise<ItemRevisionPayload> {
+  const { ciphertext, nonce } = await encryptItem(serializeItem(data), vaultKey, {
+    itemId: id,
+    revision,
+  });
+  return { id, revision, encrypted_data: toBase64(ciphertext), nonce: toBase64(nonce) };
 }
 
-/** Decrypts items, skipping (and counting) any that fail authentication. */
+/**
+ * Decrypts items, skipping (and counting) any that fail authentication or
+ * that the ledger shows are older than a revision already seen.
+ */
 export async function decryptVaultItems(
   responses: ItemResponse[],
   vaultKey: Uint8Array,
-): Promise<{ items: VaultItem[]; failed: number }> {
+  ledger?: RevisionLedger,
+): Promise<{ items: VaultItem[]; failed: number; rolledBack: number }> {
   const items: VaultItem[] = [];
   let failed = 0;
+  const rolledBack = (await ledger?.findRollbacks(responses)) ?? new Set<string>();
   for (const response of responses) {
+    if (rolledBack.has(response.id)) continue;
     try {
       const json = await decryptItem(
         fromBase64(response.encrypted_data),
         fromBase64(response.nonce),
         vaultKey,
+        { itemId: response.id, revision: response.revision },
       );
-      items.push({ id: response.id, ...parseItem(json) });
+      items.push({ id: response.id, revision: response.revision, ...parseItem(json) });
     } catch {
       failed++;
     }
   }
-  return { items, failed };
+  await ledger?.record(items);
+  return { items, failed, rolledBack: rolledBack.size };
 }

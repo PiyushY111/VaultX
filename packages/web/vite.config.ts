@@ -39,7 +39,11 @@ export default defineConfig(({ mode }) => {
     plugins: [react(), contentSecurityPolicy()],
     server: { proxy },
     preview: { proxy },
-    // libsodium's sumo build (Argon2id) embeds ~700 kB of WebAssembly.
-    build: { chunkSizeWarningLimit: 1024 },
+    // libsodium's sumo build (Argon2id) embeds ~700 kB of WebAssembly, and
+    // zxcvbn's English dictionary is ~1.2 MB; it's loaded only when a
+    // strength meter first appears.
+    build: { chunkSizeWarningLimit: 1300 },
+    // The KDF worker (src/vault/kdf.worker.ts) is a module worker.
+    worker: { format: 'es' },
   };
 });

@@ -1,5 +1,12 @@
 import { useState, type FormEvent } from 'react';
+import {
+  MIN_MASTER_PASSWORD_SCORE,
+  WEAK_MASTER_PASSWORD,
+  estimateStrength,
+  usePasswordStrength,
+} from '../lib/passwordStrength';
 import { MIN_MASTER_PASSWORD_LENGTH, signUp, type VaultSession } from '../vault/session';
+import { StrengthMeter } from './StrengthMeter';
 
 interface Props {
   onSignedUp: (session: VaultSession) => void;
@@ -12,11 +19,18 @@ export function SignupForm({ onSignedUp, onSwitchToLogin }: Props) {
   const [confirm, setConfirm] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const strength = usePasswordStrength(password, [email]);
+  const tooWeak = strength !== null && strength.score < MIN_MASTER_PASSWORD_SCORE;
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
     if (password.length < MIN_MASTER_PASSWORD_LENGTH) {
       setError(`Master password must be at least ${MIN_MASTER_PASSWORD_LENGTH} characters.`);
+      return;
+    }
+    // Checked afresh rather than trusting the debounced meter.
+    if ((await estimateStrength(password, [email])).score < MIN_MASTER_PASSWORD_SCORE) {
+      setError(WEAK_MASTER_PASSWORD);
       return;
     }
     // With zero-knowledge encryption a typo here means permanent lockout.
@@ -65,6 +79,7 @@ export function SignupForm({ onSignedUp, onSwitchToLogin }: Props) {
           onChange={(e) => setPassword(e.target.value)}
         />
       </label>
+      <StrengthMeter strength={strength} requirement={tooWeak ? WEAK_MASTER_PASSWORD : undefined} />
       <label>
         Confirm master password
         <input

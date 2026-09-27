@@ -110,28 +110,32 @@ async function addItem(
   account: Account,
   data: { site: string; username: string; password: string },
 ) {
+  const id = crypto.randomUUID();
   const { ciphertext, nonce } = await encryptItem(
     JSON.stringify({ v: 1, ...data, notes: '' }),
     account.vaultKey,
+    { itemId: id, revision: 1 },
   );
   await api('/vault-items', {
     token: await apiToken(account),
-    body: { encrypted_data: b64(ciphertext), nonce: b64(nonce) },
+    body: { id, revision: 1, encrypted_data: b64(ciphertext), nonce: b64(nonce) },
   });
 }
 
 async function listItems(account: Account) {
-  const { items } = await api<{ items: { encrypted_data: string; nonce: string }[] }>(
-    '/vault-items',
-    {
-      token: await apiToken(account),
-    },
-  );
+  const { items } = await api<{
+    items: { id: string; revision: number; encrypted_data: string; nonce: string }[];
+  }>('/vault-items', {
+    token: await apiToken(account),
+  });
   const raw = JSON.stringify(items);
   const decrypted = await Promise.all(
     items.map(async (item) =>
       JSON.parse(
-        await decryptItem(unb64(item.encrypted_data), unb64(item.nonce), account.vaultKey),
+        await decryptItem(unb64(item.encrypted_data), unb64(item.nonce), account.vaultKey, {
+          itemId: item.id,
+          revision: item.revision,
+        }),
       ),
     ),
   );
@@ -287,9 +291,7 @@ test('unlock → view → autofill → save a new login → lock', async ({ user
     await expect(page.locator('#password')).toHaveValue('');
     // Page scripts can't reach into the prompt.
     expect(
-      await page.evaluate(
-        () => document.querySelector('vaultx-prompt')?.shadowRoot ?? null,
-      ),
+      await page.evaluate(() => document.querySelector('vaultx-prompt')?.shadowRoot ?? null),
     ).toBeNull();
     await clickPromptButton(page, 'Fill');
     await expect(page.locator('#username')).toHaveValue('e2e-user');
@@ -355,6 +357,42 @@ test('the vault is locked again after the browser restarts', async ({ userDataDi
     // The non-secret email and server URL are remembered for convenience.
     await expect(reopened.getByLabel('Email')).toHaveValue(account.email);
     await expect(reopened.getByText(`Server: ${API_URL}`)).toBeVisible();
+  } finally {
+    await context.close();
+  }
+});
+
+test('clears a password copied in the popup after 30 seconds, even once the popup is closed', async ({
+  userDataDir,
+}) => {
+  test.setTimeout(120_000);
+  const account = await createAccount();
+  await addItem(account, {
+    site: 'clip.example.com',
+    username: 'u',
+    password: 'E2E-CLIP-PASSWORD',
+  });
+  const { context, extensionId } = await launch(userDataDir);
+  try {
+    await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+    const popup = await openPopup(context, extensionId);
+    await unlockInPopup(popup, account);
+    const readClipboard = () => popup.evaluate(() => navigator.clipboard.readText());
+    await popup
+      .getByRole('listitem', { name: 'clip.example.com' })
+      .getByRole('button', { name: 'Copy password' })
+      .click();
+    await expect.poll(readClipboard).toBe('E2E-CLIP-PASSWORD');
+
+    // Close the popup, as a user would; the background clears it on its own.
+    await popup.close();
+    const reader = await openPopup(context, extensionId);
+    await expect
+      .poll(() => reader.evaluate(() => navigator.clipboard.readText()), {
+        timeout: 60_000,
+        intervals: [2_000],
+      })
+      .toBe('');
   } finally {
     await context.close();
   }

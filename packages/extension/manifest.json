@@ -19,7 +19,7 @@
       "all_frames": false
     }
   ],
-  "permissions": ["storage", "alarms", "idle"],
+  "permissions": ["storage", "alarms", "idle", "offscreen", "clipboardWrite"],
   "host_permissions": ["https://*/*", "http://localhost/*", "http://127.0.0.1/*"],
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'none'; base-uri 'none'"

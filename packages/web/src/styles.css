@@ -677,6 +677,99 @@ button.link:hover {
   margin-top: 0.4rem;
 }
 
+/* Password strength: five tiles that fill from vermilion to gold. */
+.strength {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin-top: 0.5rem;
+}
+
+.strength-bar {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 3px;
+  max-width: 18rem;
+}
+
+.strength-bar span {
+  height: 5px;
+  border-radius: 1px;
+  background: var(--indigo-line);
+}
+
+.strength[data-score='0'] .is-on,
+.strength[data-score='1'] .is-on {
+  background: var(--vermilion);
+}
+
+.strength[data-score='2'] .is-on {
+  background: var(--ash);
+}
+
+.strength[data-score='3'] .is-on,
+.strength[data-score='4'] .is-on {
+  background: var(--gold);
+}
+
+.strength-label {
+  font-size: var(--step--1);
+  color: var(--ash);
+}
+
+.strength-label strong {
+  color: var(--silk);
+  font-weight: 500;
+}
+
+.strength-advice {
+  margin: 0;
+  padding-left: 1.1rem;
+  font-size: var(--step--1);
+  color: var(--ash);
+}
+
+/* Security: master password change and sessions, stacked like the add/edit sheet. */
+.security {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.sheet h3 {
+  font-size: var(--step-2);
+}
+
+.sessions {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.session {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.8rem 0;
+  border-bottom: 1px solid var(--indigo-line);
+}
+
+.session:last-child {
+  border-bottom: none;
+}
+
+.badge {
+  margin-left: 0.6rem;
+  padding: 0.1rem 0.45rem;
+  font-size: var(--step--1);
+  color: var(--ink);
+  background: var(--gold);
+  border-radius: 2px;
+}
+
 /* Password generator: framed with a dashed running stitch. */
 .generator {
   display: flex;

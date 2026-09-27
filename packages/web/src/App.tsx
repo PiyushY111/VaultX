@@ -4,6 +4,7 @@ import { LoginForm } from './components/LoginForm';
 import { SignupForm } from './components/SignupForm';
 import { VaultView } from './components/VaultView';
 import { useAutoLockSetting } from './lib/autoLockSetting';
+import { clearCopiedSecretNow } from './lib/clipboard';
 import { useAutoLock } from './lib/useAutoLock';
 import { lockSession, type VaultSession } from './vault/session';
 
@@ -25,14 +26,15 @@ export function App() {
     setScreen({ kind: 'vault', session });
   }, []);
 
-  // Wipes the vault key and token, and unmounts the vault view so every
-  // decrypted item in its state is dropped. Only the email is kept, to
-  // prefill the unlock form.
+  // Wipes the vault key and token, ends the server session, clears a copied
+  // password, and unmounts the vault view so every decrypted item in its
+  // state is dropped. Only the email is kept, to prefill the unlock form.
   const lock = useCallback((reason?: string) => {
     const session = sessionRef.current;
     if (!session) return;
     sessionRef.current = null;
     lockSession(session);
+    clearCopiedSecretNow();
     // Only explain locks the user didn't trigger (inactivity, expired session).
     setNotice(reason ?? null);
     setScreen({ kind: 'locked', email: session.email });
@@ -41,6 +43,7 @@ export function App() {
   const logOut = useCallback(() => {
     const session = sessionRef.current;
     if (session) lockSession(session);
+    clearCopiedSecretNow();
     sessionRef.current = null;
     setNotice(null);
     setScreen({ kind: 'login' });

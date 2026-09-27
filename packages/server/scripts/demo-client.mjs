@@ -6,6 +6,7 @@
 //   node scripts/demo-client.mjs signup        <email> <password>
 //   node scripts/demo-client.mjs login         <email> <password> <prelogin-response-json>
 //   node scripts/demo-client.mjs encrypt-item  <password> <vault-key-response-json> <plaintext>
+//   node scripts/demo-client.mjs update-item   <password> <vault-key-response-json> <item-response-json> <plaintext>
 //   node scripts/demo-client.mjs decrypt-items <password> <vault-key-response-json> <vault-items-response-json>
 import {
   DEFAULT_KDF_PARAMS,
@@ -18,6 +19,7 @@ import {
   generateSalt,
   generateVaultKey,
 } from '@password-manager/crypto';
+import { randomUUID } from 'node:crypto';
 
 const b64 = (bytes) => Buffer.from(bytes).toString('base64');
 const unb64 = (value) => new Uint8Array(Buffer.from(value, 'base64'));
@@ -68,11 +70,29 @@ switch (command) {
   }
   case 'encrypt-item': {
     const [password, vaultKeyResponse, plaintext] = args;
+    // A new item: the client picks its id and starts at revision 1 (both are bound into the AAD).
+    const id = randomUUID();
     const { ciphertext, nonce } = await encryptItem(
       plaintext,
       await unlockVaultKey(password, vaultKeyResponse),
+      { itemId: id, revision: 1 },
     );
-    console.log(JSON.stringify({ encrypted_data: b64(ciphertext), nonce: b64(nonce) }));
+    console.log(
+      JSON.stringify({ id, revision: 1, encrypted_data: b64(ciphertext), nonce: b64(nonce) }),
+    );
+    break;
+  }
+  case 'update-item': {
+    // The next revision of an existing item, bound to its id.
+    const [password, vaultKeyResponse, itemResponse, plaintext] = args;
+    const { id, revision: current } = JSON.parse(itemResponse);
+    const revision = current + 1;
+    const { ciphertext, nonce } = await encryptItem(
+      plaintext,
+      await unlockVaultKey(password, vaultKeyResponse),
+      { itemId: id, revision },
+    );
+    console.log(JSON.stringify({ revision, encrypted_data: b64(ciphertext), nonce: b64(nonce) }));
     break;
   }
   case 'decrypt-items': {
@@ -81,12 +101,15 @@ switch (command) {
     for (const item of JSON.parse(itemsResponse).items) {
       console.log(
         item.id,
-        await decryptItem(unb64(item.encrypted_data), unb64(item.nonce), vaultKey),
+        await decryptItem(unb64(item.encrypted_data), unb64(item.nonce), vaultKey, {
+          itemId: item.id,
+          revision: item.revision,
+        }),
       );
     }
     break;
   }
   default:
-    console.error('usage: demo-client.mjs signup|login|encrypt-item|decrypt-items ...');
+    console.error('usage: demo-client.mjs signup|login|encrypt-item|update-item|decrypt-items ...');
     process.exit(1);
 }

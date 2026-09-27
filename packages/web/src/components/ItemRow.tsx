@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { CLIPBOARD_CLEAR_MS, copySecret } from '../lib/clipboard';
 import type { VaultItem } from '../vault/items';
 
 interface Props {
@@ -19,7 +20,7 @@ export function ItemRow({ item, onEdit, onDelete }: Props) {
 
   async function copyPassword() {
     try {
-      await navigator.clipboard.writeText(item.password);
+      await copySecret(item.password);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {
@@ -44,7 +45,12 @@ export function ItemRow({ item, onEdit, onDelete }: Props) {
         <button type="button" className="btn btn-quiet" onClick={() => setRevealed((v) => !v)}>
           {revealed ? 'Hide' : 'Show'}
         </button>
-        <button type="button" className="btn btn-quiet" onClick={copyPassword}>
+        <button
+          type="button"
+          className="btn btn-quiet"
+          onClick={copyPassword}
+          title={`Copies the password; it’s cleared from the clipboard after ${CLIPBOARD_CLEAR_MS / 1000} seconds`}
+        >
           {copied ? 'Copied' : 'Copy'}
         </button>
         <button type="button" className="btn btn-quiet" onClick={onEdit}>

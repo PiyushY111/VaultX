@@ -1,6 +1,8 @@
 import { useId, useState, type FormEvent } from 'react';
+import { usePasswordStrength } from '../lib/passwordStrength';
 import type { VaultItemData } from '../vault/items';
 import { PasswordGenerator } from './PasswordGenerator';
+import { StrengthMeter } from './StrengthMeter';
 
 interface Props {
   initial: VaultItemData;
@@ -16,6 +18,8 @@ export function ItemForm({ initial, isNew, onSave, onCancel }: Props) {
   const [showGenerator, setShowGenerator] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Advice only: a site may force a weak password on you.
+  const strength = usePasswordStrength(data.password, [data.site, data.username]);
 
   const set = (field: keyof VaultItemData) => (event: { target: { value: string } }) =>
     setData((prev) => ({ ...prev, [field]: event.target.value }));
@@ -66,6 +70,7 @@ export function ItemForm({ initial, isNew, onSave, onCancel }: Props) {
             Generate…
           </button>
         </div>
+        <StrengthMeter strength={strength} />
       </div>
       {showGenerator && (
         <PasswordGenerator

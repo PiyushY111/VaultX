@@ -15,4 +15,7 @@ export const TAG_BYTES = 16;
 export const HKDF_INFO_STRETCHED_MASTER_KEY = 'password-manager:v1:stretched-master-key';
 export const HKDF_INFO_AUTH_HASH = 'password-manager:v1:auth-hash';
 export const AAD_VAULT_KEY = 'password-manager:v1:vault-key';
-export const AAD_ITEM = 'password-manager:v1:item';
+/** Items saved before ciphertexts were bound to their ID and revision (stored as revision 0). */
+export const AAD_ITEM_LEGACY = 'password-manager:v1:item';
+/** Prefix of an item's AAD; the item ID and revision are appended (see aead.ts). */
+export const AAD_ITEM = 'password-manager:v2:item';

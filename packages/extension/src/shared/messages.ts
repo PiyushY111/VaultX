@@ -41,7 +41,9 @@ export type PopupRequest =
   | { type: 'listItems' }
   | { type: 'getMatchesForTab'; tabId: number }
   | { type: 'fillTab'; tabId: number; itemId: string }
-  | { type: 'saveSettings'; settings: Settings };
+  | { type: 'saveSettings'; settings: Settings }
+  /** Sent after the popup copies a password, so the background can clear it later. */
+  | { type: 'scheduleClipboardClear' };
 
 /** Requests only a content script (top frame of an http(s) tab) may make. */
 export type ContentRequest =
@@ -56,6 +58,12 @@ export interface FillCredentialMessage {
   type: 'fillCredential';
   username: string;
   password: string;
+}
+
+/** Sent by the background to its offscreen document. */
+export interface ClearClipboardMessage {
+  target: 'offscreen';
+  type: 'clearClipboard';
 }
 
 /** Broadcast by the background after the vault unlocks. Carries no data. */
@@ -73,6 +81,7 @@ export const POPUP_REQUEST_TYPES = new Set<PopupRequest['type']>([
   'getMatchesForTab',
   'fillTab',
   'saveSettings',
+  'scheduleClipboardClear',
 ]);
 
 export const CONTENT_REQUEST_TYPES = new Set<ContentRequest['type']>([

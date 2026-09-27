@@ -8,8 +8,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { api } from '../api';
 import { installFakeServer, type FakeServer } from '../../test/fakeServer';
 import { fromBase64, toBase64 } from '../lib/base64';
-import { decryptVaultItems, encryptVaultItem } from './items';
-import { logIn, signUp } from './session';
+import { decryptVaultItems, encryptNewItem, toVaultItem, type VaultItem } from './items';
+import { WrongPasswordError, changeMasterPassword, logIn, signUp } from './session';
 
 const EMAIL = 'Alice@Example.com';
 const PASSWORD = 'MASTER-correct-horse-battery-staple-41';
@@ -40,7 +40,7 @@ const wireTraffic = () =>
 describe('what crosses the network', () => {
   it('signup → add item → login → decrypt never sends the password, derived keys, vault key or plaintext', async () => {
     const session = await signUp(EMAIL, PASSWORD);
-    await api.createItem(session.token, await encryptVaultItem(ITEM, session.vaultKey));
+    await api.createItem(session.token, await encryptNewItem(ITEM, session.vaultKey));
 
     const again = await logIn(EMAIL, PASSWORD);
     const { items } = await api.listItems(again.token);
@@ -112,13 +112,14 @@ describe('what crosses the network', () => {
     expect(signup.kdf_params).toEqual({ memoryCost: 65536, iterations: 3, parallelism: 1 });
 
     const login = JSON.parse(server.requests[1]!.body);
-    expect(Object.keys(login).sort()).toEqual(['auth_hash', 'email']);
+    expect(Object.keys(login).sort()).toEqual(['auth_hash', 'client', 'email']);
+    expect(login.client).toBe('web');
   });
 
   it('encrypts each item save with a fresh nonce', async () => {
     const session = await signUp(EMAIL, PASSWORD);
-    const a = await encryptVaultItem(ITEM, session.vaultKey);
-    const b = await encryptVaultItem(ITEM, session.vaultKey);
+    const a = await encryptNewItem(ITEM, session.vaultKey);
+    const b = await encryptNewItem(ITEM, session.vaultKey);
     expect(a.nonce).not.toBe(b.nonce);
     expect(a.encrypted_data).not.toBe(b.encrypted_data);
   });
@@ -151,5 +152,71 @@ describe('signUp', () => {
   it('rejects a short master password before doing any network or crypto work', async () => {
     await expect(signUp(EMAIL, 'short')).rejects.toThrow(/at least 12/);
     expect(server.requests).toHaveLength(0);
+  });
+});
+
+describe('changeMasterPassword', () => {
+  const NEW_PASSWORD = 'NEW-master-password-orbit-lantern-58';
+
+  async function signUpWithItem() {
+    const session = await signUp(EMAIL, PASSWORD);
+    const created = await api.createItem(
+      session.token,
+      await encryptNewItem(ITEM, session.vaultKey),
+    );
+    return { session, items: [toVaultItem(created, ITEM)] as VaultItem[] };
+  }
+
+  it('re-encrypts every item under a new vault key that only the new password unwraps', async () => {
+    const { session, items } = await signUpWithItem();
+    const oldVaultKey = session.vaultKey;
+    const oldKeyCopy = oldVaultKey.slice();
+    const requestsBefore = server.requests.length;
+
+    const updated = await changeMasterPassword(session, PASSWORD, NEW_PASSWORD, items);
+    expect(updated).toMatchObject([{ id: items[0]!.id, revision: 2, ...ITEM }]);
+    expect(oldVaultKey.every((byte) => byte === 0)).toBe(true);
+    expect(session.vaultKey).not.toEqual(oldKeyCopy);
+
+    // Nothing secret went over the wire for the change.
+    const sent = wireTraffic().slice(requestsBefore).join('\n');
+    for (const value of [PASSWORD, NEW_PASSWORD, ...Object.values(ITEM)]) {
+      expect(sent).not.toContain(value);
+    }
+    expect(sent).not.toContain(toBase64(session.vaultKey));
+
+    await expect(logIn(EMAIL, PASSWORD)).rejects.toThrow('Incorrect email or master password');
+    const again = await logIn(EMAIL, NEW_PASSWORD);
+    expect(again.vaultKey).toEqual(session.vaultKey);
+    const { items: stored } = await api.listItems(again.token);
+    const decrypted = await decryptVaultItems(stored, again.vaultKey);
+    expect(decrypted.failedIds).toEqual([]);
+    expect(decrypted.items).toMatchObject([ITEM]);
+    // Anything still encrypted under the old key would fail to open now.
+    expect((await decryptVaultItems(stored, oldKeyCopy)).failedIds).toHaveLength(1);
+  });
+
+  it('refuses a wrong current password locally, without sending anything', async () => {
+    const { session, items } = await signUpWithItem();
+    const requestsBefore = server.requests.length;
+    await expect(
+      changeMasterPassword(session, 'wrong-password-123', NEW_PASSWORD, items),
+    ).rejects.toThrow(WrongPasswordError);
+    expect(
+      server.requests.slice(requestsBefore).map((request) => `${request.method} ${request.url}`),
+    ).toEqual(['GET /api/vault-key']);
+    expect(session.vaultKey.some((byte) => byte !== 0)).toBe(true);
+    expect((await logIn(EMAIL, PASSWORD)).email).toBe('alice@example.com');
+  });
+
+  it('changes nothing if the item list is out of date', async () => {
+    const { session, items } = await signUpWithItem();
+    const keyBefore = session.vaultKey.slice();
+    await expect(changeMasterPassword(session, PASSWORD, NEW_PASSWORD, [])).rejects.toThrow(
+      /vault changed/,
+    );
+    expect(session.vaultKey).toEqual(keyBefore);
+    expect((await logIn(EMAIL, PASSWORD)).vaultKey).toEqual(keyBefore);
+    expect(items).toHaveLength(1);
   });
 });

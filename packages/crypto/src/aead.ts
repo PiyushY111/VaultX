@@ -1,4 +1,11 @@
-import { AAD_ITEM, AAD_VAULT_KEY, KEY_BYTES, NONCE_BYTES, TAG_BYTES } from './constants.js';
+import {
+  AAD_ITEM,
+  AAD_ITEM_LEGACY,
+  AAD_VAULT_KEY,
+  KEY_BYTES,
+  NONCE_BYTES,
+  TAG_BYTES,
+} from './constants.js';
 import { CryptoInputError, DecryptionError } from './errors.js';
 import { getSodium } from './sodium.js';
 import { assertBytes } from './validate.js';
@@ -92,33 +99,79 @@ export async function decryptVaultKey(
   return vaultKey;
 }
 
+/**
+ * What an item's ciphertext is bound to. Both values go into the AAD, so a
+ * ciphertext only decrypts as the item and revision it was written for: the
+ * server can't swap two items' contents, or relabel an old ciphertext as a
+ * newer revision.
+ */
+export interface ItemBinding {
+  /** The item's UUID, chosen by the client before the first save. */
+  itemId: string;
+  /**
+   * Starts at 1 and goes up by one on every save. Revision 0 marks an item
+   * saved before binding existed; those can be decrypted but never written.
+   */
+  revision: number;
+}
+
+export const LEGACY_ITEM_REVISION = 0;
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+function itemAad(binding: ItemBinding, forWriting: boolean): string {
+  if (typeof binding !== 'object' || binding === null) {
+    throw new CryptoInputError('binding must be an object');
+  }
+  const { itemId, revision } = binding;
+  if (typeof itemId !== 'string' || !UUID_PATTERN.test(itemId)) {
+    throw new CryptoInputError('binding.itemId must be a lowercase UUID');
+  }
+  if (!Number.isSafeInteger(revision) || revision < LEGACY_ITEM_REVISION) {
+    throw new CryptoInputError('binding.revision must be a non-negative integer');
+  }
+  if (revision === LEGACY_ITEM_REVISION) {
+    if (forWriting) throw new CryptoInputError('binding.revision must be at least 1');
+    return AAD_ITEM_LEGACY;
+  }
+  // Both parts are fixed-alphabet (UUID, decimal), so NUL separators are unambiguous.
+  return `${AAD_ITEM}\0${itemId}\0${revision}`;
+}
+
 /** Encrypts a vault item's JSON text with XChaCha20-Poly1305 under the vault key. */
 export async function encryptItem(
   plaintextJson: string,
   vaultKey: Uint8Array,
+  binding: ItemBinding,
 ): Promise<EncryptedPayload> {
   if (typeof plaintextJson !== 'string') {
     throw new CryptoInputError('plaintextJson must be a string');
   }
   assertBytes(vaultKey, KEY_BYTES, 'vaultKey');
+  const aad = itemAad(binding, true);
   const sodium = await getSodium();
   const plaintext = sodium.from_string(plaintextJson);
   try {
-    return seal(sodium, plaintext, vaultKey, AAD_ITEM);
+    return seal(sodium, plaintext, vaultKey, aad);
   } finally {
     sodium.memzero(plaintext);
   }
 }
 
-/** Decrypts a vault item. Throws {@link DecryptionError} on a wrong key or tampered data. */
+/**
+ * Decrypts a vault item. Throws {@link DecryptionError} on a wrong key, tampered
+ * data, or a ciphertext that belongs to a different item ID or revision.
+ */
 export async function decryptItem(
   ciphertext: Uint8Array,
   nonce: Uint8Array,
   vaultKey: Uint8Array,
+  binding: ItemBinding,
 ): Promise<string> {
   assertBytes(vaultKey, KEY_BYTES, 'vaultKey');
+  const aad = itemAad(binding, false);
   const sodium = await getSodium();
-  const plaintext = open(sodium, ciphertext, nonce, vaultKey, AAD_ITEM);
+  const plaintext = open(sodium, ciphertext, nonce, vaultKey, aad);
   try {
     return sodium.to_string(plaintext);
   } finally {

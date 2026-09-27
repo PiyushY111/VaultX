@@ -12,6 +12,11 @@ export const ENCRYPTED_VAULT_KEY_BYTES = 32 + TAG_BYTES;
 export const MAX_ITEM_CIPHERTEXT_BYTES = 1024 * 1024;
 /** Large enough for a max-size item once base64-encoded. */
 export const BODY_LIMIT_BYTES = 2 * 1024 * 1024;
+/**
+ * A password change carries every item, re-encrypted under the new vault key.
+ * Only authenticated requests get this far (the body is read after auth).
+ */
+export const CHANGE_PASSWORD_BODY_LIMIT_BYTES = 64 * 1024 * 1024;
 
 export interface KdfParams {
   memoryCost: number;

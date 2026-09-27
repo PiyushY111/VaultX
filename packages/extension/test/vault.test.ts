@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_SETTINGS } from '../src/background/settings';
 import { LockedError, PENDING_SAVE_TTL_MS, Vault } from '../src/background/vault';
 import { MemoryStore, SERVER, createFakeServer } from './helpers';
@@ -20,6 +20,7 @@ const BANK = {
 
 let server: ReturnType<typeof createFakeServer>;
 let session: MemoryStore;
+let local: MemoryStore;
 let clock: number;
 let vaultKey: Uint8Array;
 let githubId: string;
@@ -27,6 +28,7 @@ let githubId: string;
 function makeVault(autoLockMinutes = 15) {
   return new Vault({
     session,
+    local,
     fetch: server.fetch,
     now: () => clock,
     getSettings: async () => ({ ...DEFAULT_SETTINGS, serverUrl: SERVER, autoLockMinutes }),
@@ -36,6 +38,7 @@ function makeVault(autoLockMinutes = 15) {
 beforeEach(async () => {
   server = createFakeServer();
   session = new MemoryStore();
+  local = new MemoryStore();
   clock = 1_000_000;
   vaultKey = await server.register(EMAIL, PASSWORD);
   githubId = await server.seedItem(vaultKey, GITHUB);
@@ -259,5 +262,82 @@ describe('save prompt', () => {
     await vault.captureCredential(1, 'https://a.example.org', 'u', 'p');
     expect(await vault.pendingSavePrompt(2)).toBeNull();
     expect(await vault.pendingSavePrompt(1)).not.toBeNull();
+  });
+});
+
+describe('server sessions', () => {
+  it('ends the server session when the vault locks', async () => {
+    const vault = makeVault();
+    await vault.unlock(EMAIL, PASSWORD);
+    expect(server.tokens.size).toBe(1);
+    await vault.lock();
+    await vi.waitFor(() => expect(server.tokens.size).toBe(0));
+    expect(server.requests.at(-1)).toMatchObject({ method: 'POST', url: `${SERVER}/logout` });
+  });
+
+  it('logs in labelled as the extension', async () => {
+    await makeVault().unlock(EMAIL, PASSWORD);
+    const login = server.requests.find((r) => r.url === `${SERVER}/login`)!;
+    expect(JSON.parse(login.body).client).toBe('extension');
+  });
+
+  it('runs onLock after every lock', async () => {
+    const onLock = vi.fn(async () => {});
+    const vault = new Vault({
+      session,
+      local,
+      fetch: server.fetch,
+      now: () => clock,
+      getSettings: async () => ({ ...DEFAULT_SETTINGS, serverUrl: SERVER }),
+      onLock,
+    });
+    await vault.unlock(EMAIL, PASSWORD);
+    onLock.mockClear();
+    await vault.lock();
+    expect(onLock).toHaveBeenCalledOnce();
+  });
+});
+
+describe('item revisions', () => {
+  const TAB = 3;
+
+  it('saves an update as the next revision, bound to the same item', async () => {
+    const vault = makeVault();
+    await vault.unlock(EMAIL, PASSWORD);
+    await vault.captureCredential(TAB, 'https://github.com/session', 'octocat', 'ROTATED');
+    await vault.resolvePendingSave(TAB, true);
+    const stored = server.items.find((item) => item.id === githubId)!;
+    expect(stored.revision).toBe(2);
+    expect((await makeVault().credentialFor(githubId, 'https://github.com')).password).toBe(
+      'ROTATED',
+    );
+  });
+
+  it('hides an item the server rolled back to an older revision', async () => {
+    const vault = makeVault();
+    await vault.unlock(EMAIL, PASSWORD);
+    const original = { ...server.items.find((item) => item.id === githubId)! };
+    await vault.captureCredential(TAB, 'https://github.com/session', 'octocat', 'ROTATED');
+    await vault.resolvePendingSave(TAB, true);
+
+    // The server serves the old, genuinely-encrypted revision 1 again.
+    Object.assign(
+      server.items.find((item) => item.id === githubId)!,
+      original,
+    );
+    const sites = (await makeVault().listForPopup()).map((item) => item.site);
+    expect(sites).toEqual(['https://bank.example.com/login']);
+    // The ledger holds only ids and revision numbers.
+    expect(Object.values(local.data.get(`revisions:${EMAIL}`) as object)).toEqual([2, 1]);
+  });
+
+  it('drops its cache after a conflicting save, so the next attempt uses fresh data', async () => {
+    const vault = makeVault();
+    await vault.unlock(EMAIL, PASSWORD);
+    await vault.listForPopup();
+    server.items.find((item) => item.id === githubId)!.revision = 2; // saved elsewhere
+
+    await vault.captureCredential(TAB, 'https://github.com/session', 'octocat', 'ROTATED');
+    await expect(vault.resolvePendingSave(TAB, true)).rejects.toThrow('Changed elsewhere');
   });
 });

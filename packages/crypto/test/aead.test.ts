@@ -17,8 +17,15 @@ import { fixNextRandomBytes, fromHex, sequence, sodium, toHex } from './helpers.
 const VAULT_KEY = sequence(32).map((b) => b ^ 0xa0);
 const ITEM_NONCE = sequence(24, 0x10);
 const ITEM_JSON = '{"name":"example.com","username":"alice","password":"hunter2"}';
+const ITEM_ID = '6f1c2b1e-3d4a-4b5c-8d6e-7f8091a2b3c4';
+const BINDING = { itemId: ITEM_ID, revision: 7 };
+// AAD "password-manager:v2:item\0<ITEM_ID>\0" + "7".
 const ITEM_CIPHERTEXT =
+  '188cfcf69ef350da572012d10107485efa999495d2c99dd55ff106c7d3b056ded4e7e0383af73411e90c71d0742bdb22d5afc753b6426ee7a19f7798780295ec158636959e1d3f7e65d6154cf85b';
+// The same item saved before binding existed (AAD "password-manager:v1:item").
+const LEGACY_ITEM_CIPHERTEXT =
   '188cfcf69ef350da572012d10107485efa999495d2c99dd55ff106c7d3b056ded4e7e0383af73411e90c71d0742bdb22d5afc753b6426ee7a19f779878029b41a46521f4cb773d716f4b6aa5d8e8';
+const LEGACY = { itemId: ITEM_ID, revision: 0 };
 
 // stretchedMasterKey for masterKey = 00 01 .. 1f (see keys.test.ts).
 const STRETCHED_MASTER_KEY = fromHex(
@@ -153,7 +160,7 @@ describe('encryptVaultKey / decryptVaultKey', () => {
     });
 
     it('an item ciphertext presented as a vault key, even under the same key', async () => {
-      const { ciphertext, nonce } = await encryptItem(ITEM_JSON, STRETCHED_MASTER_KEY);
+      const { ciphertext, nonce } = await encryptItem(ITEM_JSON, STRETCHED_MASTER_KEY, BINDING);
       await expect(decryptVaultKey(ciphertext, nonce, STRETCHED_MASTER_KEY)).rejects.toThrow(
         DecryptionError,
       );
@@ -180,13 +187,25 @@ describe('encryptVaultKey / decryptVaultKey', () => {
 describe('encryptItem / decryptItem', () => {
   it('known-answer: fixed key + fixed nonce produce the reference ciphertext', async () => {
     await fixNextRandomBytes(ITEM_NONCE);
-    const { ciphertext, nonce } = await encryptItem(ITEM_JSON, VAULT_KEY);
+    const { ciphertext, nonce } = await encryptItem(ITEM_JSON, VAULT_KEY, BINDING);
     expect(toHex(nonce)).toBe(toHex(ITEM_NONCE));
     expect(toHex(ciphertext)).toBe(ITEM_CIPHERTEXT);
   });
 
   it('known-answer: decrypts the reference ciphertext', async () => {
-    expect(await decryptItem(fromHex(ITEM_CIPHERTEXT), ITEM_NONCE, VAULT_KEY)).toBe(ITEM_JSON);
+    expect(await decryptItem(fromHex(ITEM_CIPHERTEXT), ITEM_NONCE, VAULT_KEY, BINDING)).toBe(
+      ITEM_JSON,
+    );
+  });
+
+  it('known-answer: decrypts an item saved before binding existed as revision 0', async () => {
+    expect(await decryptItem(fromHex(LEGACY_ITEM_CIPHERTEXT), ITEM_NONCE, VAULT_KEY, LEGACY)).toBe(
+      ITEM_JSON,
+    );
+  });
+
+  it('never writes revision 0, so new saves are always bound', async () => {
+    await expect(encryptItem(ITEM_JSON, VAULT_KEY, LEGACY)).rejects.toThrow(CryptoInputError);
   });
 
   it.each([
@@ -195,13 +214,13 @@ describe('encryptItem / decryptItem', () => {
     ['non-ASCII text', '{"note":"pässwörd 🔐 密码"}'],
     ['a large item', JSON.stringify({ notes: 'x'.repeat(1_000_000) })],
   ])('round-trips %s', async (_, plaintext) => {
-    const { ciphertext, nonce } = await encryptItem(plaintext, VAULT_KEY);
-    expect(await decryptItem(ciphertext, nonce, VAULT_KEY)).toBe(plaintext);
+    const { ciphertext, nonce } = await encryptItem(plaintext, VAULT_KEY, BINDING);
+    expect(await decryptItem(ciphertext, nonce, VAULT_KEY, BINDING)).toBe(plaintext);
   });
 
   it('uses a fresh nonce for every call, so equal plaintexts give different ciphertexts', async () => {
     const results = await Promise.all(
-      Array.from({ length: 100 }, () => encryptItem(ITEM_JSON, VAULT_KEY)),
+      Array.from({ length: 100 }, () => encryptItem(ITEM_JSON, VAULT_KEY, BINDING)),
     );
     expect(new Set(results.map((r) => toHex(r.nonce))).size).toBe(100);
     expect(new Set(results.map((r) => toHex(r.ciphertext))).size).toBe(100);
@@ -211,28 +230,32 @@ describe('encryptItem / decryptItem', () => {
   });
 
   it('does not leak plaintext into the ciphertext', async () => {
-    const { ciphertext } = await encryptItem(ITEM_JSON, VAULT_KEY);
+    const { ciphertext } = await encryptItem(ITEM_JSON, VAULT_KEY, BINDING);
     expect(Buffer.from(ciphertext).includes('hunter2')).toBe(false);
   });
 
   describe('rejects', () => {
     it('a wrong vault key', async () => {
       await expect(
-        decryptItem(fromHex(ITEM_CIPHERTEXT), ITEM_NONCE, await generateVaultKey()),
+        decryptItem(fromHex(ITEM_CIPHERTEXT), ITEM_NONCE, await generateVaultKey(), BINDING),
       ).rejects.toThrow(DecryptionError);
     });
 
     it('every single-bit flip of the ciphertext', async () => {
       const ciphertext = fromHex(ITEM_CIPHERTEXT);
       for (const tampered of bitFlips(ciphertext)) {
-        await expect(decryptItem(tampered, ITEM_NONCE, VAULT_KEY)).rejects.toThrow(DecryptionError);
+        await expect(decryptItem(tampered, ITEM_NONCE, VAULT_KEY, BINDING)).rejects.toThrow(
+          DecryptionError,
+        );
       }
     });
 
     it('every single-bit flip of the nonce', async () => {
       const ciphertext = fromHex(ITEM_CIPHERTEXT);
       for (const tampered of bitFlips(ITEM_NONCE)) {
-        await expect(decryptItem(ciphertext, tampered, VAULT_KEY)).rejects.toThrow(DecryptionError);
+        await expect(decryptItem(ciphertext, tampered, VAULT_KEY, BINDING)).rejects.toThrow(
+          DecryptionError,
+        );
       }
     });
 
@@ -246,33 +269,82 @@ describe('encryptItem / decryptItem', () => {
         ciphertext.subarray(0, -1),
         extended,
       ]) {
-        await expect(decryptItem(tampered, ITEM_NONCE, VAULT_KEY)).rejects.toThrow(DecryptionError);
+        await expect(decryptItem(tampered, ITEM_NONCE, VAULT_KEY, BINDING)).rejects.toThrow(
+          DecryptionError,
+        );
       }
     });
 
     it('a ciphertext paired with another item’s nonce', async () => {
-      const a = await encryptItem(ITEM_JSON, VAULT_KEY);
-      const b = await encryptItem(ITEM_JSON, VAULT_KEY);
-      await expect(decryptItem(a.ciphertext, b.nonce, VAULT_KEY)).rejects.toThrow(DecryptionError);
+      const a = await encryptItem(ITEM_JSON, VAULT_KEY, BINDING);
+      const b = await encryptItem(ITEM_JSON, VAULT_KEY, BINDING);
+      await expect(decryptItem(a.ciphertext, b.nonce, VAULT_KEY, BINDING)).rejects.toThrow(
+        DecryptionError,
+      );
+    });
+
+    it('a ciphertext presented as another item', async () => {
+      const other = { ...BINDING, itemId: '0b7f7c1a-2e3d-4c5b-9a69-788796a5b4c3' };
+      await expect(
+        decryptItem(fromHex(ITEM_CIPHERTEXT), ITEM_NONCE, VAULT_KEY, other),
+      ).rejects.toThrow(DecryptionError);
+    });
+
+    it.each([
+      ['an older', 6],
+      ['a newer', 8],
+      ['the legacy', 0],
+    ])('a ciphertext presented as %s revision', async (_, revision) => {
+      await expect(
+        decryptItem(fromHex(ITEM_CIPHERTEXT), ITEM_NONCE, VAULT_KEY, { ...BINDING, revision }),
+      ).rejects.toThrow(DecryptionError);
+    });
+
+    it('a legacy ciphertext presented as a bound revision', async () => {
+      await expect(
+        decryptItem(fromHex(LEGACY_ITEM_CIPHERTEXT), ITEM_NONCE, VAULT_KEY, {
+          ...BINDING,
+          revision: 1,
+        }),
+      ).rejects.toThrow(DecryptionError);
     });
 
     it('a wrapped vault key presented as an item, even under the same key', async () => {
       const { ciphertext, nonce } = await encryptVaultKey(VAULT_KEY, VAULT_KEY);
-      await expect(decryptItem(ciphertext, nonce, VAULT_KEY)).rejects.toThrow(DecryptionError);
+      await expect(decryptItem(ciphertext, nonce, VAULT_KEY, BINDING)).rejects.toThrow(
+        DecryptionError,
+      );
     });
 
     it('malformed inputs', async () => {
-      await expect(encryptItem(ITEM_JSON, new Uint8Array(16))).rejects.toThrow(CryptoInputError);
-      await expect(encryptItem({} as unknown as string, VAULT_KEY)).rejects.toThrow(
+      await expect(encryptItem(ITEM_JSON, new Uint8Array(16), BINDING)).rejects.toThrow(
+        CryptoInputError,
+      );
+      await expect(encryptItem({} as unknown as string, VAULT_KEY, BINDING)).rejects.toThrow(
         CryptoInputError,
       );
       const ciphertext = fromHex(ITEM_CIPHERTEXT);
-      await expect(decryptItem(ciphertext, new Uint8Array(23), VAULT_KEY)).rejects.toThrow(
+      await expect(decryptItem(ciphertext, new Uint8Array(23), VAULT_KEY, BINDING)).rejects.toThrow(
         CryptoInputError,
       );
-      await expect(decryptItem(ciphertext, ITEM_NONCE, new Uint8Array(0))).rejects.toThrow(
+      await expect(decryptItem(ciphertext, ITEM_NONCE, new Uint8Array(0), BINDING)).rejects.toThrow(
         CryptoInputError,
       );
+      for (const binding of [
+        { itemId: 'not-a-uuid', revision: 1 },
+        { itemId: ITEM_ID.toUpperCase(), revision: 1 },
+        { itemId: ITEM_ID, revision: -1 },
+        { itemId: ITEM_ID, revision: 1.5 },
+        null,
+      ]) {
+        await expect(
+          encryptItem(ITEM_JSON, VAULT_KEY, binding as never),
+          JSON.stringify(binding),
+        ).rejects.toThrow(CryptoInputError);
+        await expect(
+          decryptItem(ciphertext, ITEM_NONCE, VAULT_KEY, binding as never),
+        ).rejects.toThrow(CryptoInputError);
+      }
     });
   });
 });

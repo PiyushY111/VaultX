@@ -41,7 +41,10 @@ interface SignupBody {
 interface LoginBody {
   email: string;
   auth_hash: string;
+  client?: 'web' | 'extension';
 }
+
+const MAX_USER_AGENT_LENGTH = 256;
 
 const normalizeEmail = (email: string): string => email.toLowerCase();
 
@@ -154,8 +157,15 @@ export function registerAuthRoutes(app: FastifyInstance, pool: pg.Pool, config: 
         user.id,
       ]);
       await pool.query(
-        'INSERT INTO sessions (user_id, token_hash, expires_at) VALUES ($1, $2, $3)',
-        [user.id, tokenHash, expiresAt],
+        `INSERT INTO sessions (user_id, token_hash, expires_at, client, user_agent)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [
+          user.id,
+          tokenHash,
+          expiresAt,
+          request.body.client ?? null,
+          request.headers['user-agent']?.slice(0, MAX_USER_AGENT_LENGTH) ?? null,
+        ],
       );
       return { token, expires_at: expiresAt };
     },

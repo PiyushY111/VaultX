@@ -4,6 +4,7 @@ import type pg from 'pg';
 import { createAuthenticate } from './authenticate.js';
 import type { Config } from './config.js';
 import { BODY_LIMIT_BYTES } from './limits.js';
+import { registerAccountRoutes } from './routes/account.js';
 import { registerAuthRoutes } from './routes/auth.js';
 import { registerVaultRoutes } from './routes/vault.js';
 
@@ -27,6 +28,7 @@ export async function buildApp({ pool, config, logger }: AppOptions): Promise<Fa
   await app.register(rateLimit, { global: false });
 
   app.decorateRequest('userId', '');
+  app.decorateRequest('sessionId', '');
 
   app.setErrorHandler(
     (error: Error & { statusCode?: number; details?: Record<string, unknown> }, request, reply) => {
@@ -49,7 +51,9 @@ export async function buildApp({ pool, config, logger }: AppOptions): Promise<Fa
   );
 
   registerAuthRoutes(app, pool, config);
-  registerVaultRoutes(app, pool, createAuthenticate(pool));
+  const authenticate = createAuthenticate(pool);
+  registerVaultRoutes(app, pool, authenticate);
+  registerAccountRoutes(app, pool, config, authenticate);
 
   return app;
 }
@@ -58,6 +62,7 @@ function errorName(statusCode: number): string {
   const names: Record<number, string> = {
     400: 'Bad Request',
     401: 'Unauthorized',
+    403: 'Forbidden',
     404: 'Not Found',
     409: 'Conflict',
     413: 'Payload Too Large',

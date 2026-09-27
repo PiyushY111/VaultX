@@ -24,10 +24,23 @@ the app and API share an origin and no CORS is needed. In production, serve
   and wrapped vault key. Login sends the email and auth hash. Items are sent as
   XChaCha20-Poly1305 ciphertext.
 - **Nothing secret is persisted.** The session token, vault key and decrypted items
-  live in memory only. The only localStorage entry is the auto-lock preference.
+  live in memory only. localStorage holds the auto-lock preference and the
+  revision ledger (item ids and revision numbers, used to spot rollbacks).
 - **Locking** (manual, auto-lock, or an expired session) zeroes the vault key,
-  drops the token, and unmounts the vault view so all decrypted items are released.
-  Unlocking requires the master password and runs the full login flow again.
+  ends the server session, clears a copied password from the clipboard, and
+  unmounts the vault view so all decrypted items are released. Unlocking
+  requires the master password and runs the full login flow again.
+- **Argon2id runs in a Web Worker** (`src/vault/kdf.worker.ts`), so the page
+  doesn't freeze while keys are derived.
+- **Strength meter:** zxcvbn (loaded on demand, runs locally) rates passwords
+  as you type. Master passwords must score at least "Strong"; item passwords
+  get advice only.
+- **Copied passwords** are cleared from the clipboard after 30 seconds.
+- **Security page:** change the master password (rotates the vault key and
+  re-encrypts every item), list sessions, and sign out one or all of them.
+- **Rollback and swap detection:** items are bound to their id and revision;
+  anything that fails to decrypt, or is older than a revision this browser
+  has seen, is hidden and reported.
 - **Search** runs over decrypted items in memory and never touches the network.
 - **KDF downgrade protection:** the client refuses server-supplied KDF params below
   the crypto package's floor.

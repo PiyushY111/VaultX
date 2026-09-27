@@ -53,6 +53,7 @@ export function classifySender(
 export interface RouterDeps {
   vault: Vault;
   settingsStore: KeyValueStore;
+  clipboard: { scheduleClear(): Promise<void> };
   tabs: {
     getUrl(tabId: number): Promise<string | undefined>;
     sendFill(tabId: number, message: FillCredentialMessage & { host: string }): Promise<void>;
@@ -133,6 +134,9 @@ async function handlePopup(request: PopupRequest, deps: RouterDeps): Promise<Res
       await tabs.sendFill(request.tabId, { type: 'fillCredential', ...credential });
       return ok(null);
     }
+    case 'scheduleClipboardClear':
+      await deps.clipboard.scheduleClear();
+      return ok(null);
     case 'saveSettings': {
       const previous = await loadSettings(settingsStore);
       const settings = await saveSettings(settingsStore, request.settings);

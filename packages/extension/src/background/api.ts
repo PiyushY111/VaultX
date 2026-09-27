@@ -40,8 +40,15 @@ export interface EncryptedItemPayload {
   nonce: string;
 }
 
+/** A save of one item: its id and revision are bound into the ciphertext. */
+export interface ItemRevisionPayload extends EncryptedItemPayload {
+  id: string;
+  revision: number;
+}
+
 export interface ItemResponse extends EncryptedItemPayload {
   id: string;
+  revision: number;
   created_at: string;
   updated_at: string;
 }
@@ -89,14 +96,15 @@ export function createApi(baseUrl: string, fetchImpl: typeof fetch) {
       }),
     login: (email: string, authHash: string) =>
       request<{ token: string; expires_at: string }>('POST', '/login', {
-        body: { email, auth_hash: authHash },
+        body: { email, auth_hash: authHash, client: 'extension' },
       }),
+    logout: (token: string) => request<void>('POST', '/logout', { token }),
     getVaultKey: (token: string) => request<VaultKeyResponse>('GET', '/vault-key', { token }),
     listItems: (token: string) =>
       request<{ items: ItemResponse[] }>('GET', '/vault-items', { token }),
-    createItem: (token: string, body: EncryptedItemPayload) =>
+    createItem: (token: string, body: ItemRevisionPayload) =>
       request<ItemResponse>('POST', '/vault-items', { token, body }),
-    updateItem: (token: string, id: string, body: EncryptedItemPayload) =>
+    updateItem: (token: string, { id, ...body }: ItemRevisionPayload) =>
       request<ItemResponse>('PUT', `/vault-items/${encodeURIComponent(id)}`, { token, body }),
   };
 }
