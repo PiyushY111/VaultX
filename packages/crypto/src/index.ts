@@ -29,3 +29,4 @@ export {
   type ManifestCheck,
   type VaultManifest,
 } from './manifest.js';
+export { decryptBackup, encryptBackup } from './backup.js';

@@ -19,6 +19,8 @@ export const BODY_LIMIT_BYTES = 4 * 1024 * 1024;
  * Only authenticated requests get this far (the body is read after auth).
  */
 export const CHANGE_PASSWORD_BODY_LIMIT_BYTES = 64 * 1024 * 1024;
+/** Items per POST /vault-items/batch (an import); clients send bigger imports in several batches. */
+export const MAX_BATCH_ITEMS = 500;
 
 export interface KdfParams {
   memoryCost: number;

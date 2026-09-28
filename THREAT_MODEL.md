@@ -375,6 +375,12 @@ Replaying or rearranging previously valid ciphertexts or credentials.
   blank for writing the password by hand; it never contains the password.
 - Deleting an account removes it and every item from the database right
   away. Copies in the operator's backups are the operator's responsibility.
+- **Files you import or export.** Other managers' CSV exports are plaintext:
+  VaultX reads them locally and reminds you to delete them, but can't
+  delete them for you. An exported backup is encrypted, but whoever gets
+  the file can guess its password offline at Argon2id cost (like a stolen
+  database), so the backup password needs the same "Strong" rating as a
+  master password.
 - Multi-user sharing, per-item keys, and mobile clients (see README →
   Future Work).
 - Side channels in libsodium or the JavaScript runtime beyond using

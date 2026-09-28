@@ -311,6 +311,19 @@ export function installFakeServer(): FakeServer {
       const mine = [...items.values()].filter((item) => item.owner === owner).map(publicItem);
       return json(200, { items: mine, manifest: user.manifest });
     }
+    if (method === 'POST' && path === '/vault-items/batch') {
+      if (body.items.length > 500 || body.items.some((i: StoredItem) => items.has(i.id)))
+        return json(409, { message: 'Conflict' });
+      const conflict = manifestConflict(body.manifest);
+      if (conflict) return conflict;
+      user.manifest = body.manifest;
+      const created = (body.items as StoredItem[]).map((fields) => {
+        const item = { ...fields, owner, created_at: now, updated_at: now };
+        items.set(item.id, item);
+        return publicItem(item);
+      });
+      return json(201, { items: created });
+    }
     if (method === 'POST' && path === '/vault-items') {
       if (body.revision !== 1 || items.has(body.id)) return json(409, { message: 'Conflict' });
       const { manifest, ...fields } = body;

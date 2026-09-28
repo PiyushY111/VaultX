@@ -49,6 +49,11 @@ the app and API share an origin and no CORS is needed. In production, serve
   password, and a two-factor code if that's on.
 - **Emergency kit:** offered after signup and from the Security page, to
   print or download. It never contains the master password.
+- **Import / export:** CSV exports from Chrome (Edge, Brave), Firefox,
+  Bitwarden and 1Password are parsed in the browser (`src/vault/importers.ts`),
+  previewed, de-duplicated against the vault, encrypted, and saved in
+  batches of 500. Exports are encrypted backup files (`src/vault/backup.ts`)
+  protected by the master password or a separate backup password.
 - **Search** runs over decrypted items in memory and never touches the network.
 - **KDF downgrade protection:** the client refuses server-supplied KDF params below
   the crypto package's floor.

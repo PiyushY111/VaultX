@@ -3,7 +3,13 @@ import type pg from 'pg';
 import { isUniqueViolation, withTransaction } from '../db.js';
 import { decodeBytes, encodeBytes } from '../encoding.js';
 import { conflict, notFound } from '../http-errors.js';
-import { MAX_ITEM_CIPHERTEXT_BYTES, NONCE_BYTES, TAG_BYTES, type KdfParams } from '../limits.js';
+import {
+  CHANGE_PASSWORD_BODY_LIMIT_BYTES,
+  MAX_ITEM_CIPHERTEXT_BYTES,
+  NONCE_BYTES,
+  TAG_BYTES,
+  type KdfParams,
+} from '../limits.js';
 import {
   advanceManifest,
   isCurrentManifest,
@@ -12,6 +18,8 @@ import {
 } from '../manifest.js';
 import {
   createItemBodySchema,
+  createItemsBodySchema,
+  itemListResponseSchema,
   deleteItemBodySchema,
   itemIdParamsSchema,
   itemResponseSchema,
@@ -164,6 +172,45 @@ export function registerVaultRoutes(
         });
         reply.code(201);
         return toItemResponse(row);
+      } catch (error) {
+        if (isUniqueViolation(error, NONCE_CONSTRAINT)) throw conflict(NONCE_REUSE_MESSAGE);
+        if (isUniqueViolation(error)) throw conflict('An item with this id already exists');
+        throw error;
+      }
+    },
+  );
+
+  // An import: many new items and one manifest change, all or nothing.
+  app.post<{ Body: { items: CreateItemBody[]; manifest: ManifestBody } }>(
+    '/vault-items/batch',
+    {
+      onRequest: authenticate,
+      bodyLimit: CHANGE_PASSWORD_BODY_LIMIT_BYTES,
+      schema: { body: createItemsBodySchema, response: { 201: itemListResponseSchema } },
+    },
+    async (request, reply) => {
+      const items = request.body.items.map((item) => ({ id: item.id, ...decodeCiphertext(item) }));
+      try {
+        const rows = await withTransaction(pool, async (db) => {
+          const { rows } = await db.query<ItemRow>(
+            `INSERT INTO vault_items (id, user_id, revision, encrypted_data, nonce)
+             SELECT id, $1, 1, encrypted_data, nonce
+             FROM unnest($2::uuid[], $3::bytea[], $4::bytea[]) AS n (id, encrypted_data, nonce)
+             RETURNING ${ITEM_COLUMNS}`,
+            [
+              request.userId,
+              items.map((item) => item.id),
+              items.map((item) => item.encryptedData),
+              items.map((item) => item.nonce),
+            ],
+          );
+          await advanceManifest(db, request.userId, request.body.manifest);
+          return rows;
+        });
+        const order = new Map(items.map((item, index) => [item.id, index]));
+        rows.sort((a, b) => order.get(a.id)! - order.get(b.id)!);
+        reply.code(201);
+        return { items: rows.map(toItemResponse) };
       } catch (error) {
         if (isUniqueViolation(error, NONCE_CONSTRAINT)) throw conflict(NONCE_REUSE_MESSAGE);
         if (isUniqueViolation(error)) throw conflict('An item with this id already exists');

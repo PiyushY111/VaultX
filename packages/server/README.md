@@ -6,21 +6,29 @@ imports that package at runtime and never decrypts anything.
 
 ## Endpoints
 
-| Method | Path                | Auth   | Purpose                                                           |
-| ------ | ------------------- | ------ | ----------------------------------------------------------------- |
-| POST   | `/signup`           | —      | Store email, KDF salt/params, auth hash, wrapped vault key        |
-| POST   | `/prelogin`         | —      | Get KDF salt/params for an email (needed to derive the auth hash) |
-| POST   | `/login`            | —      | Verify auth hash (constant-time), issue a bearer session token    |
-| GET    | `/vault-key`        | Bearer | Wrapped vault key + nonce + KDF salt/params                       |
-| GET    | `/vault-items`      | Bearer | All of the user's encrypted items                                 |
-| POST   | `/vault-items`      | Bearer | Store an encrypted item (client-chosen id, revision 1)            |
-| PUT    | `/vault-items/:id`  | Bearer | Save the item's next revision (must use a fresh nonce)            |
-| DELETE | `/vault-items/:id`  | Bearer | Delete an item                                                    |
-| POST   | `/logout`           | Bearer | End this session                                                  |
-| GET    | `/sessions`         | Bearer | The account's live sessions (client, user agent, last used)       |
-| DELETE | `/sessions/:id`     | Bearer | End one session                                                   |
-| DELETE | `/sessions`         | Bearer | Sign out everywhere (every session, including this one)           |
-| POST   | `/account/password` | Bearer | Change master password and rotate the vault key (see below)       |
+| Method | Path                           | Auth   | Purpose                                                                     |
+| ------ | ------------------------------ | ------ | --------------------------------------------------------------------------- |
+| POST   | `/signup`                      | —      | Store email, KDF salt/params, auth hash, wrapped vault key                  |
+| POST   | `/prelogin`                    | —      | Get KDF salt/params for an email (needed to derive the auth hash)           |
+| POST   | `/login`                       | —      | Verify auth hash (constant-time), issue a bearer session token              |
+| GET    | `/vault-key`                   | Bearer | Wrapped vault key + nonce + KDF salt/params                                 |
+| GET    | `/vault-items`                 | Bearer | All of the user's encrypted items                                           |
+| POST   | `/vault-items`                 | Bearer | Store an encrypted item (client-chosen id, revision 1)                      |
+| PUT    | `/vault-items/:id`             | Bearer | Save the item's next revision (must use a fresh nonce)                      |
+| DELETE | `/vault-items/:id`             | Bearer | Delete an item                                                              |
+| POST   | `/logout`                      | Bearer | End this session                                                            |
+| GET    | `/sessions`                    | Bearer | The account's live sessions (client, user agent, last used)                 |
+| DELETE | `/sessions/:id`                | Bearer | End one session                                                             |
+| DELETE | `/sessions`                    | Bearer | Sign out everywhere (every session, including this one)                     |
+| POST   | `/account/password`            | Bearer | Change master password and rotate the vault key (see below)                 |
+| POST   | `/vault-items/batch`           | Bearer | Create up to 500 items (an import) with one manifest change, all or nothing |
+| PUT    | `/vault-manifest`              | Bearer | Write a vault's first manifest (see Vault manifest)                         |
+| GET    | `/account`                     | Bearer | Email, two-factor status, recovery codes left                               |
+| POST   | `/account/totp/setup`          | Bearer | Start two-factor setup: a new secret and `otpauth://` URI                   |
+| POST   | `/account/totp/enable`         | Bearer | Confirm setup with the password and a code; returns recovery codes          |
+| POST   | `/account/totp/disable`        | Bearer | Turn two-factor off (password + code)                                       |
+| POST   | `/account/totp/recovery-codes` | Bearer | Replace the recovery codes (password + code)                                |
+| DELETE | `/account`                     | Bearer | Delete the account and all its data (password, and a code if 2FA is on)     |
 
 Binary fields are standard padded base64 in JSON.
 

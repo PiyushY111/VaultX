@@ -977,3 +977,17 @@ button.link:hover {
     border: none;
   }
 }
+
+/* Import preview */
+.import-preview {
+  margin: 0;
+  padding-left: 1.1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.file-pick input[type='file'] {
+  color: var(--silk);
+  font: inherit;
+}

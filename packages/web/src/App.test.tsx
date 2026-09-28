@@ -493,3 +493,87 @@ describe('delete account', () => {
     expect(Object.keys(localStorage)).toEqual([]);
   });
 });
+
+describe('import and export', () => {
+  const CHROME_CSV = `name,url,username,password,note
+github.com,https://github.com/login,octocat,ITEM-PW-hunter2-xyz,dupe of the one in the vault
+news.example.org,https://news.example.org/login,reader,CSV-IMPORTED-PW,
+`;
+
+  it('imports a Chrome CSV, exports an encrypted backup, and restores it elsewhere', async () => {
+    const user = userEvent.setup();
+    await signUpAndAddItem(user); // github.com / octocat / ITEM-PW-hunter2-xyz
+
+    await user.click(screen.getByRole('button', { name: 'Import / export' }));
+    const importer = screen.getByRole('region', { name: 'Import' });
+    await user.upload(
+      within(importer).getByLabelText('Choose a file to import'),
+      new File([CHROME_CSV], 'Chrome Passwords.csv', { type: 'text/csv' }),
+    );
+    expect(await within(importer).findByRole('status')).toHaveTextContent(
+      'Found 2 logins in this Chrome file. 1 is already in your vault and will be skipped.',
+    );
+    await user.click(within(importer).getByRole('button', { name: 'Import 1 login' }));
+    expect(await within(importer).findByText('Imported 1 login.')).toBeInTheDocument();
+    expect(within(importer).getByText(/delete the CSV file/)).toBeInTheDocument();
+    expect(server.requests.at(-1)!.body).not.toContain('CSV-IMPORTED-PW');
+
+    // Export, capturing the file the browser would download.
+    const createObjectURL = vi.fn<(blob: Blob) => string>(() => 'blob:backup');
+    Object.assign(URL, { createObjectURL, revokeObjectURL: vi.fn() });
+    const exporter = screen.getByRole('form', { name: 'Export' });
+    await user.type(within(exporter).getByLabelText('Master password'), PASSWORD);
+    await user.click(within(exporter).getByRole('button', { name: 'Download encrypted backup' }));
+    expect(await within(exporter).findByRole('status', {}, { timeout: 20_000 })).toHaveTextContent(
+      'opens with your master password',
+    );
+    const backup = await createObjectURL.mock.calls[0]![0].text();
+    expect(backup).not.toContain('CSV-IMPORTED-PW');
+
+    // A different account restores it.
+    await user.click(screen.getByRole('button', { name: 'Log out' }));
+    await user.click(screen.getByRole('button', { name: 'Create an account' }));
+    await user.type(screen.getByLabelText('Email'), 'bob@example.com');
+    await user.type(screen.getByLabelText('Master password'), `${PASSWORD}-bob`);
+    await user.type(screen.getByLabelText('Confirm master password'), `${PASSWORD}-bob`);
+    await user.click(screen.getByRole('button', { name: 'Create account' }));
+    await screen.findByText(/Signed in as/, {}, { timeout: 10_000 });
+    await user.click(screen.getByRole('button', { name: 'Import / export' }));
+    const bobImport = screen.getByRole('region', { name: 'Import' });
+    await user.upload(
+      within(bobImport).getByLabelText('Choose a file to import'),
+      new File([backup], 'vaultx-backup.json', { type: 'application/json' }),
+    );
+    await user.type(await within(bobImport).findByLabelText('Backup password'), 'wrong-password');
+    await user.click(within(bobImport).getByRole('button', { name: 'Open backup' }));
+    expect(await within(bobImport).findByRole('alert', {}, { timeout: 10_000 })).toHaveTextContent(
+      'doesn’t open this backup',
+    );
+    await user.type(within(bobImport).getByLabelText('Backup password'), PASSWORD);
+    await user.click(within(bobImport).getByRole('button', { name: 'Open backup' }));
+    await user.click(
+      await within(bobImport).findByRole(
+        'button',
+        { name: 'Import 2 logins' },
+        { timeout: 10_000 },
+      ),
+    );
+    await within(bobImport).findByText('Imported 2 logins.');
+    expect(within(bobImport).queryByText(/delete the CSV file/)).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Back to vault' }));
+    expect(screen.getByRole('listitem', { name: 'news.example.org' })).toBeInTheDocument();
+    expect(screen.getByRole('listitem', { name: ITEM.site })).toBeInTheDocument();
+  });
+
+  it('explains a file it can’t read', async () => {
+    const user = userEvent.setup();
+    await signUpAndAddItem(user);
+    await user.click(screen.getByRole('button', { name: 'Import / export' }));
+    const importer = screen.getByRole('region', { name: 'Import' });
+    await user.upload(
+      within(importer).getByLabelText('Choose a file to import'),
+      new File(['hello,world\n1,2\n'], 'notes.csv', { type: 'text/csv' }),
+    );
+    expect(await within(importer).findByRole('alert')).toHaveTextContent(/password column/);
+  });
+});

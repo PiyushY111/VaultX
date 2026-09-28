@@ -234,3 +234,51 @@ test('two-factor login and account deletion, end to end', async ({ page }) => {
   await page.getByRole('button', { name: 'Log in' }).click();
   await expect(page.getByRole('alert')).toContainText('Incorrect email or master password');
 });
+
+test('imports a CSV and restores an encrypted backup into another account', async ({ page }) => {
+  const { requests } = watch(page);
+  const first = uniqueAccount();
+  await signUp(page, first);
+  await page.getByRole('button', { name: 'I’ve saved it' }).click();
+
+  await page.getByRole('button', { name: 'Import / export' }).click();
+  const importer = page.getByRole('region', { name: 'Import' });
+  await importer.getByLabel('Choose a file to import').setInputFiles({
+    name: 'bitwarden_export.csv',
+    mimeType: 'text/csv',
+    buffer: Buffer.from(
+      'folder,favorite,type,name,notes,fields,reprompt,login_uri,login_username,login_password,login_totp\n' +
+        ',,login,GitLab,,,0,https://gitlab.com,E2E-IMPORT-USER,E2E-IMPORT-PW,\n' +
+        ',,note,Secret note,text,,0,,,,\n',
+    ),
+  });
+  await expect(importer.getByRole('status')).toContainText('Found 1 login in this Bitwarden file');
+  await importer.getByRole('button', { name: 'Import 1 login' }).click();
+  await expect(importer.getByText('Imported 1 login.')).toBeVisible();
+
+  const exporter = page.getByRole('form', { name: 'Export' });
+  await exporter.getByLabel('Master password').fill(first.password);
+  const download = page.waitForEvent('download');
+  await exporter.getByRole('button', { name: 'Download encrypted backup' }).click();
+  const file = await download;
+  expect(file.suggestedFilename()).toMatch(/^vaultx-backup-\d{4}-\d{2}-\d{2}\.json$/);
+  const backupPath = await file.path();
+
+  await page.getByRole('button', { name: 'Log out' }).click();
+  const second = uniqueAccount();
+  await signUp(page, second);
+  await page.getByRole('button', { name: 'Import / export' }).click();
+  await importer.getByLabel('Choose a file to import').setInputFiles(backupPath);
+  await importer.getByLabel('Backup password').fill(first.password);
+  await importer.getByRole('button', { name: 'Open backup' }).click();
+  await importer.getByRole('button', { name: 'Import 1 login' }).click();
+  await expect(importer.getByText('Imported 1 login.')).toBeVisible();
+  await page.getByRole('button', { name: 'Back to vault' }).click();
+  await expect(page.getByRole('listitem', { name: 'gitlab.com' })).toContainText('E2E-IMPORT-USER');
+
+  for (const request of requests) {
+    for (const secret of ['E2E-IMPORT-USER', 'E2E-IMPORT-PW', first.password]) {
+      expect(request, `leaked "${secret}"`).not.toContain(secret);
+    }
+  }
+});

@@ -21,3 +21,5 @@ export const AAD_ITEM_LEGACY = 'password-manager:v1:item';
 export const AAD_ITEM = 'password-manager:v2:item';
 /** Prefix of the vault manifest's AAD; the manifest version is appended (see manifest.ts). */
 export const AAD_MANIFEST = 'password-manager:v1:manifest';
+/** AAD of an exported backup file (see backup.ts). */
+export const AAD_BACKUP = 'password-manager:v1:backup';

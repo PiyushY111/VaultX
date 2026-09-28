@@ -207,6 +207,45 @@ export class VaultSync {
     }
   }
 
+  /** Maximum items the server takes in one batch; bigger imports go in several. */
+  static readonly BATCH_SIZE = 500;
+
+  /**
+   * Adds many items (an import), a batch at a time: each batch is saved with
+   * its manifest change in one transaction. Returns what was saved; if a
+   * batch fails, the ones before it stay saved and the error says how far it got.
+   */
+  async createMany(
+    data: readonly VaultItemData[],
+    onProgress?: (saved: number) => void,
+  ): Promise<VaultItem[]> {
+    const saved: VaultItem[] = [];
+    for (let start = 0; start < data.length; start += VaultSync.BATCH_SIZE) {
+      const batch = data.slice(start, start + VaultSync.BATCH_SIZE);
+      const payloads = await Promise.all(
+        batch.map((item) => encryptNewItem(item, this.session.vaultKey)),
+      );
+      const manifest = this.next({ set: payloads.map(({ id }) => ({ id, revision: 1 })) });
+      try {
+        const { items } = await api.createItems(
+          this.session.token,
+          payloads,
+          await encryptManifestPayload(manifest, this.session.vaultKey),
+        );
+        this.commit(manifest, items);
+        saved.push(...items.map((response, i) => toVaultItem(response, batch[i]!)));
+        onProgress?.(saved.length);
+      } catch (error) {
+        if (saved.length === 0) rethrow(error);
+        throw new Error(
+          `Imported ${saved.length} of ${data.length} logins, then stopped: ${(error as Error).message}`,
+          { cause: error },
+        );
+      }
+    }
+    return saved;
+  }
+
   async update(item: VaultItem, data: VaultItemData): Promise<VaultItem> {
     const payload = await encryptNextRevision(item, data, this.session.vaultKey);
     const manifest = this.next({ set: [{ id: item.id, revision: payload.revision }] });

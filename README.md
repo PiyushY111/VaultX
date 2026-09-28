@@ -20,6 +20,9 @@ vault, stay on your devices:
   device can tell when the server hides, adds or rolls back items.
 - **Optional two-factor login** (authenticator app codes, with recovery
   codes), **account deletion**, and a printable **emergency kit**.
+- **Import from Chrome, Firefox, Bitwarden or 1Password** (their CSV
+  exports), and **export an encrypted backup** that restores into any
+  VaultX account.
 - **The server stores opaque blobs.** Integration tests scan every raw
   database row to confirm no plaintext or key material is ever stored.
 

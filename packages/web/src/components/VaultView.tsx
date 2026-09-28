@@ -17,6 +17,7 @@ import { ItemForm } from './ItemForm';
 import { ItemRow } from './ItemRow';
 import { PasswordGenerator } from './PasswordGenerator';
 import { SecurityPanel } from './SecurityPanel';
+import { TransferPanel } from './TransferPanel';
 
 interface Props {
   session: VaultSession;
@@ -70,6 +71,7 @@ export function VaultView({
   const [editing, setEditing] = useState<Editing>(null);
   const [showGenerator, setShowGenerator] = useState(false);
   const [showSecurity, setShowSecurity] = useState(false);
+  const [showTransfer, setShowTransfer] = useState(false);
   const [showKit, setShowKit] = useState(justSignedUp);
   const [error, setError] = useState<string | null>(null);
   const ledger = useMemo(() => createRevisionLedger(session.email), [session.email]);
@@ -173,6 +175,7 @@ export function VaultView({
             aria-pressed={showSecurity}
             onClick={() => {
               setEditing(null);
+              setShowTransfer(false);
               setShowSecurity((v) => !v);
             }}
           >
@@ -201,7 +204,25 @@ export function VaultView({
           <EmergencyKit email={session.email} onDone={() => setShowKit(false)} firstTime />
         )}
 
-        {showSecurity ? (
+        {showTransfer ? (
+          <TransferPanel
+            session={session}
+            items={items}
+            unverifiedCount={countWarnings(warnings)}
+            importItems={async (data, onProgress) => {
+              try {
+                const saved = await sync.current!.createMany(data, onProgress);
+                setItems((prev) => [...(prev ?? []), ...saved]);
+              } catch (err) {
+                // Some batches may have been saved: show what the server has now.
+                await load().catch(handleError);
+                throw err;
+              }
+            }}
+            onSessionExpired={() => onLock(SESSION_EXPIRED)}
+            onClose={() => setShowTransfer(false)}
+          />
+        ) : showSecurity ? (
           <SecurityPanel
             session={session}
             items={items}
@@ -261,6 +282,16 @@ export function VaultView({
                 onClick={() => setEditing({ mode: 'new' })}
               >
                 Add item
+              </button>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => {
+                  setShowSecurity(false);
+                  setShowTransfer(true);
+                }}
+              >
+                Import / export
               </button>
               <button
                 type="button"

@@ -219,6 +219,7 @@ describe('authentication on protected routes', () => {
     { method: 'DELETE', url: `/sessions/${randomUUID()}` },
     { method: 'POST', url: '/account/password' },
     { method: 'PUT', url: '/vault-manifest' },
+    { method: 'POST', url: '/vault-items/batch' },
     { method: 'GET', url: '/account' },
     { method: 'POST', url: '/account/totp/setup' },
     { method: 'POST', url: '/account/totp/enable' },
@@ -1282,5 +1283,77 @@ describe('DELETE /account', () => {
       (await remove(token, { current_auth_hash: b64(user.authHash), totp_code: totpCode(secret) }))
         .statusCode,
     ).toBe(204);
+  });
+});
+
+describe('POST /vault-items/batch', () => {
+  async function batchBody(
+    token: string,
+    vaultKey: Uint8Array,
+    plaintexts: string[],
+    ids: string[] = plaintexts.map(() => randomUUID()),
+  ) {
+    const items = await Promise.all(
+      plaintexts.map(async (plaintext, i) => ({
+        id: ids[i]!,
+        revision: 1,
+        ...(await encryptedItemPayload(plaintext, vaultKey, { itemId: ids[i]!, revision: 1 })),
+      })),
+    );
+    const manifest = await manifestFor(ctx.app, token, vaultKey, {
+      set: items.map(({ id }) => ({ id, revision: 1 })),
+    });
+    return { items, manifest };
+  }
+  const post = (token: string, payload: object) =>
+    ctx.app.inject({ method: 'POST', url: '/vault-items/batch', headers: bearer(token), payload });
+
+  it('creates every item and moves the manifest on once', async () => {
+    const { user, token } = await registerAndLogin(ctx.app, 'batch@example.com', 'pw-batch');
+    const body = await batchBody(token, user.vaultKey, ['{"n":1}', '{"n":2}', '{"n":3}']);
+    const response = await post(token, body);
+    expect(response.statusCode, response.body).toBe(201);
+    expect(response.json().items.map((item: ItemResponse) => item.id)).toEqual(
+      body.items.map((item) => item.id),
+    );
+    const manifest = await currentManifest(ctx.app, token, user.vaultKey);
+    expect(manifest!.version).toBe(1);
+    expect(Object.keys(manifest!.items).sort()).toEqual(body.items.map((i) => i.id).sort());
+  });
+
+  it('is all or nothing', async () => {
+    const { user, token } = await registerAndLogin(ctx.app, 'batch-atomic@example.com', 'pw-b');
+    const existing = await createItem(ctx.app, token, user.vaultKey, '{"n":0}');
+    // The second id collides with an existing item, so nothing is stored.
+    const body = await batchBody(
+      token,
+      user.vaultKey,
+      ['{"n":1}', '{"n":2}'],
+      [randomUUID(), existing.id],
+    );
+    expect((await post(token, body)).statusCode).toBe(409);
+    const listed = (
+      await ctx.app.inject({ method: 'GET', url: '/vault-items', headers: bearer(token) })
+    ).json<{ items: ItemResponse[] }>();
+    expect(listed.items.map((item) => item.id)).toEqual([existing.id]);
+
+    // And a stale manifest refuses the whole batch too.
+    const stale = await batchBody(token, user.vaultKey, ['{"n":3}']);
+    await createItem(ctx.app, token, user.vaultKey, '{"n":4}');
+    expect((await post(token, stale)).statusCode).toBe(409);
+  });
+
+  it('refuses empty, oversized and malformed batches', async () => {
+    const { user, token } = await registerAndLogin(ctx.app, 'batch-bad@example.com', 'pw-b');
+    const body = await batchBody(token, user.vaultKey, ['{"n":1}']);
+    expect((await post(token, { ...body, items: [] })).statusCode).toBe(400);
+    expect(
+      (await post(token, { ...body, items: Array.from({ length: 501 }, () => body.items[0]) }))
+        .statusCode,
+    ).toBe(400);
+    expect(
+      (await post(token, { ...body, items: [{ ...body.items[0], revision: 2 }] })).statusCode,
+    ).toBe(400);
+    expect((await post(token, { items: body.items })).statusCode).toBe(400);
   });
 });

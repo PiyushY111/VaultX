@@ -119,3 +119,21 @@ describe('vault manifest', () => {
     expect(Object.keys(here.currentManifest().items)).toHaveLength(2);
   });
 });
+
+describe('createMany (import)', () => {
+  it('saves in batches, each with its manifest change', async () => {
+    const sync = thisDevice();
+    await sync.load();
+    const data = Array.from({ length: VaultSync.BATCH_SIZE + 3 }, (_, i) =>
+      item(`site-${i}.example.com`),
+    );
+    const progress: number[] = [];
+    const saved = await sync.createMany(data, (count) => progress.push(count));
+    expect(saved).toHaveLength(data.length);
+    expect(progress).toEqual([VaultSync.BATCH_SIZE, data.length]);
+    expect(user().manifest!.version).toBe(3); // first manifest + two batches
+    const loaded = await freshDevice().load();
+    expect(loaded.items).toHaveLength(data.length);
+    expect(loaded.warnings.missingIds).toEqual([]);
+  });
+});

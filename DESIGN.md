@@ -198,6 +198,42 @@ user row; items, sessions and recovery codes go with it (`ON DELETE
 CASCADE`). The web vault asks for the email to be typed as confirmation, and
 forgets its revision ledger for the account afterwards.
 
+### Import
+
+The web vault reads CSV exports in the browser and maps their columns to
+items: Chrome/Edge/Brave (`name,url,username,password,note`), Firefox,
+Bitwarden (logins only; cards, identities and notes are skipped) and
+1Password. The site becomes the URL's host, which is what autofill matches;
+TOTP secrets and differing names go into the notes, since there are no
+fields for them yet. Logins already in the vault (same site, username and
+password) are skipped. The rest are encrypted and sent with
+`POST /vault-items/batch {items, manifest}`: up to 500 new items and one
+manifest change in one transaction; bigger imports are several batches.
+
+### Encrypted backups
+
+Export writes one JSON file:
+
+```json
+{
+  "format": "vaultx-backup",
+  "version": 1,
+  "created_at": "…",
+  "kdf": { "salt": "…", "params": { "memoryCost": 65536, "iterations": 3, "parallelism": 1 } },
+  "nonce": "…",
+  "ciphertext": "…"
+}
+```
+
+The key comes from the backup password (the master password unless another
+is chosen) through the same Argon2id + HKDF derivation as logging in, with
+the file's own fresh salt, so it's unrelated to the account's keys. The
+ciphertext is XChaCha20-Poly1305 with AAD `password-manager:v1:backup` over
+`{"v":1, "created_at", "items": [item JSON…]}`. Reading a backup refuses KDF
+params below the floor, so an edited file can't make guessing cheap. Export
+asks for the master password first, even when a separate backup password
+is used.
+
 ### Emergency kit
 
 Offered right after signup and from the Security page: a text sheet to

@@ -1,5 +1,6 @@
 import { base64Schema } from './encoding.js';
 import {
+  MAX_BATCH_ITEMS,
   AUTH_HASH_BYTES,
   ENCRYPTED_VAULT_KEY_BYTES,
   KDF_LIMITS,
@@ -131,6 +132,31 @@ export const createItemBodySchema = {
     id: clientItemIdSchema,
     revision: { type: 'integer', const: 1 },
     ...ciphertextProperties,
+    manifest: manifestBodySchema,
+  },
+} as const;
+
+/** Several new items in one write (an import), with the vault's next manifest. */
+export const createItemsBodySchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['items', 'manifest'],
+  properties: {
+    items: {
+      type: 'array',
+      minItems: 1,
+      maxItems: MAX_BATCH_ITEMS,
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['id', 'revision', 'encrypted_data', 'nonce'],
+        properties: {
+          id: clientItemIdSchema,
+          revision: { type: 'integer', const: 1 },
+          ...ciphertextProperties,
+        },
+      },
+    },
     manifest: manifestBodySchema,
   },
 } as const;

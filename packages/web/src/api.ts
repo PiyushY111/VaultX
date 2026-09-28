@@ -175,6 +175,11 @@ export const api = {
   // Every write carries the vault's next manifest; the server applies both or neither.
   createItem: (token: string, item: ItemRevisionPayload, manifest: ManifestPayload) =>
     request<ItemResponse>('POST', '/vault-items', { token, body: { ...item, manifest } }),
+  createItems: (token: string, items: ItemRevisionPayload[], manifest: ManifestPayload) =>
+    request<{ items: ItemResponse[] }>('POST', '/vault-items/batch', {
+      token,
+      body: { items, manifest },
+    }),
   updateItem: (token: string, { id, ...item }: ItemRevisionPayload, manifest: ManifestPayload) =>
     request<ItemResponse>('PUT', `/vault-items/${encodeURIComponent(id)}`, {
       token,
