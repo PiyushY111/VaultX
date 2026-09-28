@@ -8,7 +8,8 @@ const CONTENT_SECURITY_POLICY = [
   "default-src 'self'",
   "script-src 'self' 'wasm-unsafe-eval'",
   "style-src 'self'",
-  "connect-src 'self'",
+  // Have I Been Pwned's range API, for the opt-in breach check (hash prefixes only).
+  "connect-src 'self' https://api.pwnedpasswords.com",
   "img-src 'self' data:",
   "object-src 'none'",
   "base-uri 'none'",

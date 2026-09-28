@@ -6,15 +6,15 @@ const NOW = new Date('2026-09-28T00:00:00Z');
 const STRONG = 'orbit-lantern-quilt-58-marrow';
 
 let n = 0;
-const item = (site: string, password: string, updatedAt = '2026-09-01T00:00:00Z'): VaultItem => ({
+const item = (site: string, password: string, createdAt = '2026-09-01T00:00:00Z'): VaultItem => ({
   id: `id-${n++}`,
   revision: 1,
   site,
   username: 'alice',
   password,
   notes: '',
-  createdAt: updatedAt,
-  updatedAt,
+  createdAt,
+  updatedAt: '2026-09-27T00:00:00Z',
 });
 
 describe('checkPasswordHealth', () => {
@@ -46,7 +46,31 @@ describe('checkPasswordHealth', () => {
     expect(report.issues.map((issue) => issue.reusedWith)).toEqual([2, 2, 2]);
   });
 
-  it('flags logins not saved for over a year', async () => {
+  it('dates a password from its history when there is one', async () => {
+    const changed = {
+      ...item('a.example.com', STRONG, '2020-01-01T00:00:00Z'),
+      history: [{ password: 'previous', changedAt: '2026-09-20T00:00:00Z' }],
+    };
+    expect((await checkPasswordHealth([changed], NOW)).old).toBe(0);
+  });
+
+  it('only checks logins', async () => {
+    const note = { ...item('Note', 'not-a-password'), type: 'note' as const };
+    expect((await checkPasswordHealth([note], NOW)).checked).toBe(0);
+  });
+
+  it('reports breached passwords first once counts are given', async () => {
+    const items = [item('a.example.com', STRONG), item('b.example.com', 'password1')];
+    const report = await checkPasswordHealth(items, NOW, new Map([[STRONG, 3]]));
+    expect(report.breached).toBe(1);
+    expect(report.issues.map((issue) => [issue.item.site, issue.breaches])).toEqual([
+      ['a.example.com', 3],
+      ['b.example.com', 0],
+    ]);
+    expect((await checkPasswordHealth(items, NOW)).breached).toBeNull();
+  });
+
+  it('flags passwords in use for over a year', async () => {
     const report = await checkPasswordHealth(
       [
         item('old.example.com', STRONG, '2025-06-01T00:00:00Z'),

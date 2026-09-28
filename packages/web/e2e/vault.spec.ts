@@ -252,9 +252,9 @@ test('imports a CSV and restores an encrypted backup into another account', asyn
         ',,note,Secret note,text,,0,,,,\n',
     ),
   });
-  await expect(importer.getByRole('status')).toContainText('Found 1 login in this Bitwarden file');
-  await importer.getByRole('button', { name: 'Import 1 login' }).click();
-  await expect(importer.getByText('Imported 1 login.')).toBeVisible();
+  await expect(importer.getByRole('status')).toContainText('Found 2 items in this Bitwarden file');
+  await importer.getByRole('button', { name: 'Import 2 items' }).click();
+  await expect(importer.getByText('Imported 2 items.')).toBeVisible();
 
   const exporter = page.getByRole('form', { name: 'Export' });
   await exporter.getByLabel('Master password').fill(first.password);
@@ -271,8 +271,8 @@ test('imports a CSV and restores an encrypted backup into another account', asyn
   await importer.getByLabel('Choose a file to import').setInputFiles(backupPath);
   await importer.getByLabel('Backup password').fill(first.password);
   await importer.getByRole('button', { name: 'Open backup' }).click();
-  await importer.getByRole('button', { name: 'Import 1 login' }).click();
-  await expect(importer.getByText('Imported 1 login.')).toBeVisible();
+  await importer.getByRole('button', { name: 'Import 2 items' }).click();
+  await expect(importer.getByText('Imported 2 items.')).toBeVisible();
   await page.getByRole('button', { name: 'Back to vault' }).click();
   await expect(page.getByRole('listitem', { name: 'gitlab.com' })).toContainText('E2E-IMPORT-USER');
 

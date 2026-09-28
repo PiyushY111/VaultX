@@ -46,17 +46,19 @@ describe('parseImport', () => {
     ]);
   });
 
-  it('reads a Bitwarden export, keeping TOTP secrets in notes and skipping non-logins', () => {
+  it('reads a Bitwarden export: logins and secure notes; cards are skipped', () => {
     const result = parseImport(BITWARDEN);
     expect(result.source).toBe('Bitwarden');
-    expect(result.skipped).toBe(2);
+    expect(result.skipped).toBe(1);
     expect(result.items).toEqual([
       {
         site: 'gitlab.com',
         username: 'gl-user',
         password: 'gl-pass',
+        // A secret that doesn't parse is kept in the notes rather than lost.
         notes: 'multi\nline\nName: GitLab\nTOTP: otpauth://totp/GitLab?secret=ABC',
       },
+      { type: 'note', site: 'My secret note', username: '', password: '', notes: 'just a note' },
     ]);
   });
 

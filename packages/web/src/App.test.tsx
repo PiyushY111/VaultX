@@ -94,7 +94,7 @@ describe('signup → add item → lock → unlock', () => {
     expect(screen.getByRole('listitem', { name: ITEM.site })).toBeInTheDocument();
     await user.clear(screen.getByLabelText('Search vault'));
     await user.type(screen.getByLabelText('Search vault'), 'no-such-site');
-    expect(screen.getByText('No items match your search.')).toBeInTheDocument();
+    expect(screen.getByText('No items match your search or filters.')).toBeInTheDocument();
     expect(server.requests).toHaveLength(requestsBefore);
     await user.clear(screen.getByLabelText('Search vault'));
 
@@ -512,10 +512,10 @@ news.example.org,https://news.example.org/login,reader,CSV-IMPORTED-PW,
       new File([CHROME_CSV], 'Chrome Passwords.csv', { type: 'text/csv' }),
     );
     expect(await within(importer).findByRole('status')).toHaveTextContent(
-      'Found 2 logins in this Chrome file. 1 is already in your vault and will be skipped.',
+      'Found 2 items in this Chrome file. 1 is already in your vault and will be skipped.',
     );
-    await user.click(within(importer).getByRole('button', { name: 'Import 1 login' }));
-    expect(await within(importer).findByText('Imported 1 login.')).toBeInTheDocument();
+    await user.click(within(importer).getByRole('button', { name: 'Import 1 item' }));
+    expect(await within(importer).findByText('Imported 1 item.')).toBeInTheDocument();
     expect(within(importer).getByText(/delete the CSV file/)).toBeInTheDocument();
     expect(server.requests.at(-1)!.body).not.toContain('CSV-IMPORTED-PW');
 
@@ -553,13 +553,9 @@ news.example.org,https://news.example.org/login,reader,CSV-IMPORTED-PW,
     await user.type(within(bobImport).getByLabelText('Backup password'), PASSWORD);
     await user.click(within(bobImport).getByRole('button', { name: 'Open backup' }));
     await user.click(
-      await within(bobImport).findByRole(
-        'button',
-        { name: 'Import 2 logins' },
-        { timeout: 10_000 },
-      ),
+      await within(bobImport).findByRole('button', { name: 'Import 2 items' }, { timeout: 10_000 }),
     );
-    await within(bobImport).findByText('Imported 2 logins.');
+    await within(bobImport).findByText('Imported 2 items.');
     expect(within(bobImport).queryByText(/delete the CSV file/)).not.toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Back to vault' }));
     expect(screen.getByRole('listitem', { name: 'news.example.org' })).toBeInTheDocument();
@@ -592,7 +588,7 @@ describe('password health', () => {
     await user.click(within(form).getByRole('button', { name: 'Save' }));
     await screen.findByRole('listitem', { name: 'gitlab.com' });
     const github = [...server.items.values()].find((stored) => stored.revision === 1)!;
-    github.updated_at = '2020-01-01T00:00:00.000Z';
+    github.created_at = '2020-01-01T00:00:00.000Z';
     await user.click(screen.getByRole('button', { name: 'Lock now' }));
     await unlock(user, PASSWORD);
     await screen.findByRole('listitem', { name: ITEM.site }, { timeout: 10_000 });
@@ -611,7 +607,7 @@ describe('password health', () => {
     const toFix = within(panel).getAllByRole('listitem', { name: /\.com$/ });
     expect(toFix.map((li) => li.getAttribute('aria-label'))).toEqual([ITEM.site]);
     expect(toFix[0]).toHaveTextContent('Same password as 1 other login');
-    expect(toFix[0]).toHaveTextContent(/Not saved in \d+ months/);
+    expect(toFix[0]).toHaveTextContent(/Password unchanged for \d+ months/);
 
     // Fix it with the generator; the report updates when the form closes.
     await user.click(within(toFix[0]!).getByRole('button', { name: 'Change password' }));
@@ -658,5 +654,117 @@ describe('two-factor codes in items', () => {
     expect(within(updated).getByRole('timer')).toHaveAccessibleName(/seconds left/);
     await user.click(within(updated).getByRole('button', { name: 'Copy code' }));
     expect(await navigator.clipboard.readText()).toMatch(/^\d{6}$/);
+  });
+});
+
+describe('item kinds, tags and favorites', () => {
+  it('adds a secure note and a card, filters by tag and favorites', async () => {
+    const user = userEvent.setup();
+    await signUpAndAddItem(user);
+
+    await user.click(screen.getByRole('button', { name: 'Add item' }));
+    let form = screen.getByRole('form', { name: 'Add item' });
+    await user.selectOptions(within(form).getByLabelText('Type'), 'note');
+    await user.type(within(form).getByLabelText('Title'), 'Wi-Fi at home');
+    await user.type(within(form).getByLabelText('Notes'), 'SSID: home, key: NOTE-SECRET-KEY');
+    await user.type(within(form).getByLabelText('Tags'), 'home, Family');
+    await user.click(within(form).getByLabelText('Favorite (shown first in the vault)'));
+    await user.click(within(form).getByRole('button', { name: 'Save' }));
+    const note = await screen.findByRole('listitem', { name: 'Wi-Fi at home' });
+    expect(note).toHaveTextContent('Secure note');
+    expect(within(note).getByRole('list', { name: 'Tags' })).toHaveTextContent('homeFamily');
+    expect(server.requests.at(-1)!.body).not.toContain('NOTE-SECRET-KEY');
+
+    await user.click(screen.getByRole('button', { name: 'Add item' }));
+    form = screen.getByRole('form', { name: 'Add item' });
+    await user.selectOptions(within(form).getByLabelText('Type'), 'card');
+    await user.type(within(form).getByLabelText('Title'), 'Visa');
+    await user.type(within(form).getByLabelText('Name on card'), 'Ada Lovelace');
+    await user.type(within(form).getByLabelText('Card number'), '4111 1111 1111 1111');
+    await user.type(within(form).getByLabelText('Security code'), '987');
+    await user.click(within(form).getByRole('button', { name: 'Save' }));
+    const card = await screen.findByRole('listitem', { name: 'Visa' });
+    expect(card).toHaveTextContent('•••• •••• •••• 1111');
+    expect(card).not.toHaveTextContent('987');
+    await user.click(within(card).getByRole('button', { name: 'Show' }));
+    expect(card).toHaveTextContent('4111 1111 1111 1111');
+    expect(card).toHaveTextContent('Security code 987');
+
+    // The favorite note sorts first; filters narrow the list.
+    // Vault entries only: the tag chips inside a row are list items too.
+    const names = () =>
+      screen
+        .getAllByRole('listitem')
+        .filter((li) => li.classList.contains('entry'))
+        .map((li) => li.getAttribute('aria-label'));
+    expect(names()).toEqual(['Wi-Fi at home', ITEM.site, 'Visa']);
+    await user.click(screen.getByRole('button', { name: 'Family' }));
+    expect(names()).toEqual(['Wi-Fi at home']);
+    await user.click(screen.getByRole('button', { name: 'Family' }));
+    await user.click(
+      within(screen.getByRole('listitem', { name: ITEM.site })).getByRole('button', {
+        name: 'Favorite',
+      }),
+    );
+    await user.click(screen.getByRole('button', { name: '★ Favorites' }));
+    await waitFor(() => expect(names()).toEqual([ITEM.site, 'Wi-Fi at home']));
+  });
+});
+
+describe('password history', () => {
+  it('keeps the old password when a login’s password changes', async () => {
+    const user = userEvent.setup();
+    await signUpAndAddItem(user);
+    const row = screen.getByRole('listitem', { name: ITEM.site });
+    await user.click(within(row).getByRole('button', { name: 'Edit' }));
+    let form = screen.getByRole('form', { name: 'Edit item' });
+    expect(
+      within(form).queryByRole('region', { name: 'Password history' }),
+    ).not.toBeInTheDocument();
+    await user.clear(within(form).getByLabelText('Password'));
+    await user.type(within(form).getByLabelText('Password'), 'ROTATED-password-777');
+    await user.click(within(form).getByRole('button', { name: 'Save' }));
+    await screen.findByRole('listitem', { name: ITEM.site });
+    expect(server.requests.at(-1)!.body).not.toContain(ITEM.password);
+
+    await user.click(
+      within(screen.getByRole('listitem', { name: ITEM.site })).getByRole('button', {
+        name: 'Edit',
+      }),
+    );
+    form = screen.getByRole('form', { name: 'Edit item' });
+    const history = within(form).getByRole('region', { name: 'Password history' });
+    await user.click(within(history).getByRole('button', { name: /Show password history \(1\)/ }));
+    expect(history).toHaveTextContent(ITEM.password);
+    expect(history).toHaveTextContent(/replaced/);
+  });
+});
+
+describe('breach check', () => {
+  it('is opt-in, sends only hash prefixes, and flags breached passwords', async () => {
+    const user = userEvent.setup();
+    await signUpAndAddItem(user);
+    server.breached.set(ITEM.password, 42);
+
+    await user.click(screen.getByRole('button', { name: 'Password health' }));
+    const panel = screen.getByRole('region', { name: 'Password health' });
+    await within(panel).findByRole('status');
+    expect(server.requests.some((r) => r.url.includes('pwnedpasswords'))).toBe(false);
+    expect(within(panel).queryByRole('button', { name: /Breached/ })).not.toBeInTheDocument();
+
+    await user.click(
+      within(panel).getByRole('button', { name: 'Check against Have I Been Pwned' }),
+    );
+    const breachSection = within(panel).getByRole('region', { name: 'Breach check' });
+    expect(await within(breachSection).findByRole('status')).toHaveTextContent(
+      '1 password appear in known breaches',
+    );
+    const hibpRequests = server.requests.filter((r) => r.url.includes('pwnedpasswords'));
+    expect(hibpRequests).toHaveLength(1);
+    expect(hibpRequests[0]!.url).toMatch(/\/range\/[0-9A-F]{5}$/);
+    expect(hibpRequests[0]!.body).toBe('');
+    expect(within(panel).getByRole('button', { name: '1 Breached' })).toBeInTheDocument();
+    const toFix = within(panel).getAllByRole('listitem', { name: ITEM.site });
+    expect(toFix[0]).toHaveTextContent('Found in 42 known data breaches');
   });
 });

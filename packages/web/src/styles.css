@@ -1062,3 +1062,76 @@ button.link:hover {
   border-radius: 50%;
   background: conic-gradient(var(--gold) calc(var(--left) * 360deg), var(--indigo-line) 0);
 }
+
+/* Item kinds, tags and favorites */
+.entry-type {
+  margin-left: 0.6rem;
+  padding: 0.1rem 0.45rem;
+  font-family: var(--sans);
+  font-size: var(--step--1);
+  font-weight: 400;
+  color: var(--ash);
+  border: 1px solid var(--indigo-line);
+  border-radius: 2px;
+  vertical-align: middle;
+}
+
+.entry-tags,
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin: 0.4rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.entry-tags li,
+.chip {
+  padding: 0.1rem 0.55rem;
+  font: inherit;
+  font-size: var(--step--1);
+  color: var(--ash);
+  background: var(--night-raised);
+  border: 1px solid var(--indigo-line);
+  border-radius: 999px;
+}
+
+.chip {
+  cursor: pointer;
+}
+
+.chip[aria-pressed='true'] {
+  color: var(--ink);
+  background: var(--gold);
+  border-color: var(--gold);
+}
+
+.chips {
+  margin: 0 0 0.75rem;
+}
+
+.star {
+  font-size: var(--step-1);
+  line-height: 1;
+}
+
+.star.is-on {
+  color: var(--gold-bright);
+}
+
+.history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.history-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+}

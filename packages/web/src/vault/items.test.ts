@@ -8,9 +8,12 @@ import {
   encryptNewItem,
   encryptNextRevision,
   filterItems,
+  normalizeTags,
   parseItem,
   serializeItem,
+  withPasswordHistory,
   type VaultItem,
+  type VaultItemData,
 } from './items';
 import { createRevisionLedger } from './revisionLedger';
 
@@ -180,5 +183,108 @@ describe('encrypted items are bound to their id and revision', () => {
     };
     const { items } = await decryptVaultItems([legacy], key);
     expect(items).toMatchObject([{ ...DATA, revision: 0 }]);
+  });
+});
+
+describe('item kinds, tags, favorites and history', () => {
+  const data = { site: 'github.com', username: 'u', password: 'p', notes: '' };
+
+  it('leaves every new field out of the JSON when unset, so old items encrypt as before', () => {
+    expect(
+      serializeItem({ ...data, type: 'login', tags: [], favorite: false, fields: {}, history: [] }),
+    ).toBe(serializeItem(data));
+  });
+
+  it('round-trips a card with tags, a favorite flag and a history', () => {
+    const card = {
+      ...data,
+      type: 'card' as const,
+      tags: ['Work', 'travel'],
+      favorite: true,
+      fields: { cardholder: 'A. Person', number: '4111 1111 1111 1111', expiry: '12/30', cvv: '' },
+      history: [{ password: 'old', changedAt: '2026-01-01T00:00:00.000Z' }],
+    };
+    const parsed = parseItem(serializeItem(card));
+    // Empty card fields are dropped; everything else comes back as it went in.
+    expect(parsed).toEqual({
+      ...card,
+      fields: { cardholder: 'A. Person', number: '4111 1111 1111 1111', expiry: '12/30' },
+    });
+  });
+
+  it.each([
+    ['an unknown type', { type: 'wallet' }],
+    ['tags that are not strings', { tags: [1] }],
+    ['a non-boolean favorite', { favorite: 'yes' }],
+    ['non-string fields', { fields: { number: 4111 } }],
+    ['a malformed history', { history: [{ password: 'x' }] }],
+  ])('rejects %s', (_, bad) => {
+    expect(() => parseItem(JSON.stringify({ v: 1, ...data, ...bad }))).toThrow();
+  });
+
+  it('normalizes tags: trims, drops empties and case-insensitive repeats', () => {
+    expect(normalizeTags(' work, Personal ,, WORK ,personal')).toEqual(['work', 'Personal']);
+  });
+
+  it('records the old password when a login’s password changes, keeping the last 10', () => {
+    const now = new Date('2026-09-28T00:00:00.000Z');
+    const unchanged = withPasswordHistory(data, { ...data, notes: 'edited' }, now);
+    expect(unchanged.history).toBeUndefined();
+    let item: VaultItemData = data;
+    for (let i = 1; i <= 12; i++)
+      item = withPasswordHistory(item, { ...item, password: `p${i}` }, now);
+    expect(item.history).toHaveLength(10);
+    expect(item.history!.map((entry) => entry.password)).toEqual([
+      'p2',
+      'p3',
+      'p4',
+      'p5',
+      'p6',
+      'p7',
+      'p8',
+      'p9',
+      'p10',
+      'p11',
+    ]);
+    expect(item.history![0]!.changedAt).toBe(now.toISOString());
+    // Notes and cards have no password history.
+    expect(
+      withPasswordHistory({ ...data, type: 'note' }, { ...data, type: 'note', password: 'x' })
+        .history,
+    ).toBeUndefined();
+  });
+});
+
+describe('filterItems with tags and favorites', () => {
+  const items: VaultItem[] = [
+    { ...item('zeta.com', 'u', '', 'p'), favorite: true, tags: ['Work'] },
+    { ...item('alpha.com', 'u', '', 'p'), tags: ['work', 'travel'] },
+    { ...item('mid.com', 'u', '', 'p') },
+  ];
+
+  it('puts favorites first', () => {
+    expect(filterItems(items, '').map((i) => i.site)).toEqual(['zeta.com', 'alpha.com', 'mid.com']);
+  });
+
+  it('filters by tag (case-insensitively) and by favorites, and searches tags', () => {
+    expect(filterItems(items, '', { tag: 'WORK' }).map((i) => i.site)).toEqual([
+      'zeta.com',
+      'alpha.com',
+    ]);
+    expect(filterItems(items, '', { favoritesOnly: true }).map((i) => i.site)).toEqual([
+      'zeta.com',
+    ]);
+    expect(filterItems(items, 'travel').map((i) => i.site)).toEqual(['alpha.com']);
+  });
+
+  it('searches card and identity details, but never the security code', () => {
+    const card: VaultItem = {
+      ...item('Visa', '', '', ''),
+      type: 'card',
+      fields: { cardholder: 'Ada Lovelace', number: '4111 1111 1111 1111', cvv: '987' },
+    };
+    expect(filterItems([card], 'lovelace')).toHaveLength(1);
+    expect(filterItems([card], '1111')).toHaveLength(1);
+    expect(filterItems([card], '987')).toHaveLength(0);
   });
 });

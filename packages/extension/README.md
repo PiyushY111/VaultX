@@ -46,6 +46,9 @@ After rebuilding, click the reload icon on the extension's card.
 - **Two-factor:** if the account has it on, the popup asks for the code after
   the password. The derived keys wait in the background worker's memory
   (never storage) for up to five minutes.
+- **Logins only:** notes, cards and identities from the web vault are read
+  and preserved (e.g. when a save prompt updates a login's password, its
+  history is kept) but never listed, matched or filled.
 - **Two-factor codes:** the popup shows a login's live code (computed in the
   background; the secret never reaches the popup). On a site's 2FA page
   (`findOtpField` in `src/content/detect.ts`: an `autocomplete="one-time-code"`

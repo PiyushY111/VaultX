@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { vi } from 'vitest';
 
 /**
@@ -59,6 +60,8 @@ export interface FakeServer {
   sessions: Map<string, StoredSession>;
   expireAllSessions(): void;
   restore(): void;
+  /** Passwords the fake Have I Been Pwned reports as breached, with their counts. */
+  breached: Map<string, number>;
 }
 
 export function installFakeServer(): FakeServer {
@@ -66,6 +69,7 @@ export function installFakeServer(): FakeServer {
   const users = new Map<string, StoredUser>();
   const items: FakeServer['items'] = new Map();
   const sessions: FakeServer['sessions'] = new Map();
+  const breached: FakeServer['breached'] = new Map();
   let nextId = 1;
 
   const json = (status: number, body?: unknown) =>
@@ -90,6 +94,21 @@ export function installFakeServer(): FakeServer {
     );
     const bodyText = typeof init.body === 'string' ? init.body : '';
     requests.push({ method, url, headers, body: bodyText });
+
+    // Have I Been Pwned's range API: every known hash suffix for a 5-character prefix.
+    if (url.startsWith('https://api.pwnedpasswords.com/range/')) {
+      const prefix = url.slice(-5).toUpperCase();
+      const lines = [...breached]
+        .map(
+          ([password, count]) =>
+            [createHash('sha1').update(password).digest('hex').toUpperCase(), count] as const,
+        )
+        .filter(([hash]) => hash.startsWith(prefix))
+        .map(([hash, count]) => `${hash.slice(5)}:${count}`);
+      // Padding entries, as the real service adds with Add-Padding.
+      lines.push('0000000000000000000000000000000000A:0');
+      return new Response(lines.join('\r\n'), { status: 200 });
+    }
     const body = bodyText ? JSON.parse(bodyText) : {};
     const path = url.replace(/^\/api/, '');
 
@@ -367,6 +386,7 @@ export function installFakeServer(): FakeServer {
     users,
     items,
     sessions,
+    breached,
     expireAllSessions: () => sessions.clear(),
     restore: () => vi.unstubAllGlobals(),
   };

@@ -81,8 +81,24 @@ export function parseImport(text: string): ParsedImport {
   let skipped = 0;
   for (const row of rows.slice(1)) {
     const get = (column: number) => (column === -1 ? '' : (row[column] ?? '').trim());
-    // Bitwarden also exports cards, identities and notes.
-    if (at.type !== -1 && get(at.type) && get(at.type).toLowerCase() !== 'login') {
+    // Bitwarden also exports notes (imported as secure notes), and cards and
+    // identities, whose details its CSV doesn't include.
+    const rowType = at.type === -1 ? '' : get(at.type).toLowerCase();
+    if (rowType === 'note' || rowType === 'securenote') {
+      const title = get(at.name);
+      const body = get(at.notes);
+      if (!title && !body) skipped++;
+      else
+        items.push({
+          type: 'note',
+          site: title || 'Secure note',
+          username: '',
+          password: '',
+          notes: body,
+        });
+      continue;
+    }
+    if (rowType && rowType !== 'login') {
       skipped++;
       continue;
     }
@@ -122,7 +138,13 @@ export function withoutDuplicates(
   existing: readonly VaultItemData[],
 ): { items: VaultItemData[]; duplicates: number } {
   const key = (item: VaultItemData) =>
-    JSON.stringify([item.site.toLowerCase(), item.username, item.password]);
+    JSON.stringify([
+      item.type ?? 'login',
+      item.site.toLowerCase(),
+      item.username,
+      item.password,
+      item.type && item.type !== 'login' ? item.notes : '',
+    ]);
   const seen = new Set(existing.map(key));
   const items: VaultItemData[] = [];
   for (const item of incoming) {

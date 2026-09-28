@@ -234,6 +234,18 @@ params below the floor, so an edited file can't make guessing cheap. Export
 asks for the master password first, even when a separate backup password
 is used.
 
+### Breach check (opt-in)
+
+The web vault's health report can check passwords against Have I Been
+Pwned's Pwned Passwords with its k-anonymity range API
+(`packages/web/src/lib/breachCheck.ts`): it sends the first five hex
+characters of each password's SHA-1 hash to
+`https://api.pwnedpasswords.com/range/<prefix>` (with `Add-Padding`, so
+response sizes don't hint at the prefix), receives every known hash with that
+prefix, and compares locally. Passwords sharing a prefix take one request;
+requests run four at a time. It's off unless the user clicks the button, and
+the production CSP allows that origin for it.
+
 ### Emergency kit
 
 Offered right after signup and from the Security page: a text sheet to
@@ -387,8 +399,25 @@ see site names, usernames, passwords, notes or search queries.
 { "v": 1, "site": "github.com", "username": "octocat", "password": "…", "notes": "…", "totp": "…" }
 ```
 
-`totp` is optional: the site's two-factor setup key (base32) or `otpauth://`
-link, as the user pasted it. It's left out of the JSON when empty, so items
+Optional fields, each left out of the JSON when unset so older items encrypt
+exactly as before:
+
+| Field      | Contents                                                                              |
+| ---------- | ------------------------------------------------------------------------------------- |
+| `type`     | `note`, `card` or `identity`; absent for a login. `site` is the title for those.      |
+| `totp`     | The site's two-factor setup key or `otpauth://` link, as pasted (logins).             |
+| `tags`     | Free-form labels, deduplicated case-insensitively.                                    |
+| `favorite` | `true` to sort first in the vault.                                                    |
+| `fields`   | Card details (`cardholder`, `number`, `expiry`, `cvv`) or identity details.           |
+| `history`  | Earlier passwords, oldest first, each with when it was replaced; at most 10 (logins). |
+
+The extension reads and preserves all of them but only offers logins (its
+popup, autofill and save prompt ignore the other kinds). When the extension's
+save prompt updates a password it records the old one in `history`, like the
+web vault does.
+
+`totp` is the site's two-factor setup key (base32) or `otpauth://` link, as
+the user pasted it. It's left out of the JSON when empty, so items
 without one encrypt exactly as before. Codes are computed on the client
 (`packages/crypto/src/totp.ts`, RFC 6238 over WebCrypto HMAC; SHA-1/256/512,
 6–8 digits, any period). In the extension the secret stays in the

@@ -1,7 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError } from '../api';
 import { AUTO_LOCK_OPTIONS_MINUTES } from '../lib/autoLockSetting';
-import { emptyItem, filterItems, type VaultItem, type VaultItemData } from '../vault/items';
+import {
+  emptyItem,
+  filterItems,
+  withPasswordHistory,
+  type VaultItem,
+  type VaultItemData,
+} from '../vault/items';
 import { createRevisionLedger } from '../vault/revisionLedger';
 import type { VaultSession } from '../vault/session';
 import {
@@ -73,6 +79,8 @@ export function VaultView({
   const [warnings, setWarnings] = useState<VaultWarnings>(NO_WARNINGS);
   const [lastChanged, setLastChanged] = useState<LoadedVault['lastChanged']>(null);
   const [query, setQuery] = useState('');
+  const [tag, setTag] = useState<string | null>(null);
+  const [favoritesOnly, setFavoritesOnly] = useState(false);
   const [editing, setEditing] = useState<Editing>(null);
   const [showGenerator, setShowGenerator] = useState(false);
   const [view, setView] = useState<View>('vault');
@@ -106,7 +114,18 @@ export function VaultView({
   }, [load]);
 
   // Search runs over the decrypted items in memory; the query never leaves the browser.
-  const visible = useMemo(() => filterItems(items ?? [], query), [items, query]);
+  const visible = useMemo(
+    () => filterItems(items ?? [], query, { tag, favoritesOnly }),
+    [items, query, tag, favoritesOnly],
+  );
+  const allTags = useMemo(() => {
+    const seen = new Map<string, string>();
+    for (const item of items ?? [])
+      for (const t of item.tags ?? []) if (!seen.has(t.toLowerCase())) seen.set(t.toLowerCase(), t);
+    return [...seen.values()].sort((a, b) =>
+      a.localeCompare(b, undefined, { sensitivity: 'base' }),
+    );
+  }, [items]);
 
   function closeEditor() {
     if (editing?.mode === 'edit' && editing.from) setView(editing.from);
@@ -116,7 +135,10 @@ export function VaultView({
   async function save(data: VaultItemData) {
     try {
       if (editing?.mode === 'edit') {
-        const saved = await sync.current!.update(editing.item, data);
+        const saved = await sync.current!.update(
+          editing.item,
+          withPasswordHistory(editing.item, data),
+        );
         setItems((prev) => (prev ?? []).map((item) => (item.id === saved.id ? saved : item)));
       } else {
         const saved = await sync.current!.create(data);
@@ -137,6 +159,20 @@ export function VaultView({
     }
   }
 
+  async function toggleFavorite(item: VaultItem) {
+    try {
+      const saved = await sync.current!.update(item, { ...item, favorite: !item.favorite });
+      setItems((prev) => (prev ?? []).map((other) => (other.id === saved.id ? saved : other)));
+    } catch (err) {
+      if (err instanceof VaultChangedError) {
+        await load().catch(handleError);
+        setError('Your vault was changed elsewhere, so it has been reloaded. Try again.');
+      } else {
+        handleError(err);
+      }
+    }
+  }
+
   async function remove(item: VaultItem) {
     if (!window.confirm(`Delete ${item.site}?`)) return;
     try {
@@ -152,7 +188,7 @@ export function VaultView({
     }
   }
 
-  const count = items?.length ? `${items.length} ${items.length === 1 ? 'login' : 'logins'}` : null;
+  const count = items?.length ? `${items.length} ${items.length === 1 ? 'item' : 'items'}` : null;
 
   return (
     <div className="vault">
@@ -316,6 +352,29 @@ export function VaultView({
               </button>
             </div>
             {showGenerator && <PasswordGenerator />}
+            {(allTags.length > 0 || (items?.some((item) => item.favorite) ?? false)) && (
+              <div className="chips" role="group" aria-label="Filter by tag">
+                <button
+                  type="button"
+                  className="chip"
+                  aria-pressed={favoritesOnly}
+                  onClick={() => setFavoritesOnly((v) => !v)}
+                >
+                  ★ Favorites
+                </button>
+                {allTags.map((t) => (
+                  <button
+                    key={t}
+                    type="button"
+                    className="chip"
+                    aria-pressed={tag?.toLowerCase() === t.toLowerCase()}
+                    onClick={() => setTag((current) => (current === t ? null : t))}
+                  >
+                    {t}
+                  </button>
+                ))}
+              </div>
+            )}
             {items === null ? (
               <p className="quiet-state">Decrypting vault…</p>
             ) : visible.length === 0 ? (
@@ -328,7 +387,7 @@ export function VaultView({
                     </p>
                   </>
                 ) : (
-                  <p>No items match your search.</p>
+                  <p>No items match your search or filters.</p>
                 )}
               </div>
             ) : (
@@ -339,6 +398,7 @@ export function VaultView({
                     item={item}
                     onEdit={() => setEditing({ mode: 'edit', item })}
                     onDelete={() => remove(item)}
+                    onToggleFavorite={() => toggleFavorite(item)}
                   />
                 ))}
               </ul>

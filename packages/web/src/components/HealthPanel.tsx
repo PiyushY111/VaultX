@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
+import { checkBreaches } from '../lib/breachCheck';
 import { OLD_AFTER_DAYS, checkPasswordHealth, type HealthReport } from '../lib/passwordHealth';
-import type { VaultItem } from '../vault/items';
+import { isLogin, type VaultItem } from '../vault/items';
 
 interface Props {
   /** Every verified item in the vault. Null while loading. */
@@ -9,28 +10,54 @@ interface Props {
   onClose: () => void;
 }
 
-type Filter = 'all' | 'weak' | 'reused' | 'old';
+type Filter = 'all' | 'breached' | 'weak' | 'reused' | 'old';
+type BreachState =
+  | { kind: 'idle' }
+  | { kind: 'checking'; done: number; total: number }
+  | { kind: 'done'; counts: Map<string, number> }
+  | { kind: 'error'; message: string };
 
-const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? '' : 's'}`;
+const plural = (count: number, word: string, pluralWord = `${word}s`) =>
+  `${count} ${count === 1 ? word : pluralWord}`;
 
 export function HealthPanel({ items, onEdit, onClose }: Props) {
   const [report, setReport] = useState<HealthReport | null>(null);
   const [filter, setFilter] = useState<Filter>('all');
+  const [breach, setBreach] = useState<BreachState>({ kind: 'idle' });
+  const breaches = breach.kind === 'done' ? breach.counts : undefined;
 
   useEffect(() => {
     if (!items) return;
     let active = true;
     setReport(null);
-    checkPasswordHealth(items).then((result) => active && setReport(result));
+    checkPasswordHealth(items, new Date(), breaches).then((result) => active && setReport(result));
     return () => {
       active = false;
     };
-  }, [items]);
+  }, [items, breaches]);
+
+  async function runBreachCheck() {
+    if (!items) return;
+    const passwords = items.filter((item) => isLogin(item) && item.password).map((i) => i.password);
+    setBreach({ kind: 'checking', done: 0, total: 0 });
+    try {
+      const counts = await checkBreaches(passwords, {
+        onProgress: (done, total) => setBreach({ kind: 'checking', done, total }),
+      });
+      setBreach({ kind: 'done', counts });
+    } catch (error) {
+      setBreach({
+        kind: 'error',
+        message: error instanceof Error ? error.message : 'The breach check failed.',
+      });
+    }
+  }
 
   const shown =
     report?.issues.filter(
       (issue) =>
         filter === 'all' ||
+        (filter === 'breached' && issue.breaches) ||
         (filter === 'weak' && issue.weak) ||
         (filter === 'reused' && issue.reusedWith) ||
         (filter === 'old' && issue.ageDays !== null),
@@ -38,6 +65,9 @@ export function HealthPanel({ items, onEdit, onClose }: Props) {
 
   const tiles: [Filter, string, number][] = report
     ? [
+        ...(report.breached !== null
+          ? [['breached', 'Breached', report.breached] as [Filter, string, number]]
+          : []),
         ['weak', 'Weak', report.weak],
         ['reused', 'Reused', report.reused],
         ['old', 'Old', report.old],
@@ -53,7 +83,8 @@ export function HealthPanel({ items, onEdit, onClose }: Props) {
         </button>
       </div>
       <p className="hint">
-        Checked on this device only; nothing about your passwords is sent anywhere.
+        Checked on this device; nothing about your passwords is sent anywhere unless you run the
+        breach check below.
       </p>
 
       {report === null ? (
@@ -92,12 +123,18 @@ export function HealthPanel({ items, onEdit, onClose }: Props) {
 
           {shown.length > 0 && (
             <ul className="ledger" aria-label="Logins to fix">
-              {shown.map(({ item, weak, reusedWith, ageDays }) => (
+              {shown.map(({ item, weak, reusedWith, ageDays, breaches: found }) => (
                 <li key={item.id} className="entry health-entry" aria-label={item.site}>
                   <div className="entry-body">
                     <strong className="entry-site">{item.site}</strong>
                     {item.username && <span className="entry-user">{item.username}</span>}
                     <ul className="health-reasons">
+                      {found ? (
+                        <li data-kind="breached">
+                          Found in {plural(found, 'known data breach', 'known data breaches')}:
+                          change it now
+                        </li>
+                      ) : null}
                       {weak && (
                         <li data-kind="weak">
                           Weak ({weak.label.toLowerCase()}){weak.warning ? `: ${weak.warning}` : ''}
@@ -109,7 +146,9 @@ export function HealthPanel({ items, onEdit, onClose }: Props) {
                         </li>
                       )}
                       {ageDays !== null && (
-                        <li data-kind="old">Not saved in {Math.floor(ageDays / 30)} months</li>
+                        <li data-kind="old">
+                          Password unchanged for {Math.floor(ageDays / 30)} months
+                        </li>
                       )}
                     </ul>
                   </div>
@@ -123,13 +162,50 @@ export function HealthPanel({ items, onEdit, onClose }: Props) {
             </ul>
           )}
           <p className="hint">
-            “Old” means the login hasn’t been saved in over {OLD_AFTER_DAYS / 365} year (VaultX
-            doesn’t record when just the password changed). Reused passwords are the most urgent:
-            one breached site exposes the others. Use the generator in the edit form for a strong,
-            unique one.
+            “Old” means the password has been in use for over {OLD_AFTER_DAYS / 365} year, going by
+            its password history (or, for logins from before history was kept, when the item was
+            created). Reused passwords are the most urgent: one breached site exposes the others.
+            Use the generator in the edit form for a strong, unique one.
           </p>
         </>
       )}
+
+      <div className="sheet" role="region" aria-label="Breach check">
+        <h3>Check for breached passwords</h3>
+        <p className="hint">
+          Compares your passwords with Have I Been Pwned’s list of passwords exposed in data
+          breaches. Only the first five characters of each password’s hash are sent, never the
+          password or the full hash; the comparison happens here. That service will still learn that
+          someone checked some passwords from your address, which is why this is off unless you run
+          it.
+        </p>
+        {breach.kind === 'error' && (
+          <p className="error" role="alert">
+            {breach.message}
+          </p>
+        )}
+        {breach.kind === 'done' && report?.breached !== null && report !== null && (
+          <p role="status" className={report.breached ? 'warning' : 'notice'}>
+            {report.breached
+              ? `${plural(report.breached, 'password')} appear in known breaches. Change them first.`
+              : 'None of your passwords appear in known breaches.'}
+          </p>
+        )}
+        <div className="row sheet-actions">
+          <button
+            type="button"
+            className="btn btn-primary"
+            disabled={breach.kind === 'checking' || !items}
+            onClick={runBreachCheck}
+          >
+            {breach.kind === 'checking'
+              ? `Checking… ${breach.done} of ${breach.total || '?'}`
+              : breach.kind === 'done'
+                ? 'Check again'
+                : 'Check against Have I Been Pwned'}
+          </button>
+        </div>
+      </div>
     </section>
   );
 }

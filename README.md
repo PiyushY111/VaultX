@@ -28,6 +28,10 @@ vault, stay on your devices:
 - **Two-factor codes for sites:** save a site's setup key with its login and
   the vault shows the live 6-digit code; the extension can fill it on the
   site's 2FA page.
+- **Secure notes, cards and identities** alongside logins, with **tags and
+  favorites**, and a **password history** kept inside each login.
+- **Opt-in breach check** against Have I Been Pwned, sending only hash
+  prefixes.
 - **The server stores opaque blobs.** Integration tests scan every raw
   database row to confirm no plaintext or key material is ever stored.
 

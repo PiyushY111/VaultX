@@ -178,15 +178,15 @@ function ImportSection({ items, importItems, onSessionExpired }: Props) {
       {step.kind === 'preview' && (
         <>
           <p role="status">
-            Found <strong>{step.items.length + step.duplicates}</strong> login
+            Found <strong>{step.items.length + step.duplicates}</strong> item
             {step.items.length + step.duplicates === 1 ? '' : 's'} in this {step.source} file.
             {step.duplicates > 0 &&
               ` ${step.duplicates} ${step.duplicates === 1 ? 'is' : 'are'} already in your vault and will be skipped.`}
             {step.skipped > 0 &&
-              ` ${step.skipped} other row${step.skipped === 1 ? '' : 's'} (not logins, or empty) will be skipped.`}
+              ` ${step.skipped} other row${step.skipped === 1 ? '' : 's'} (cards, identities, or empty) will be skipped.`}
           </p>
           {step.items.length > 0 && (
-            <ul className="import-preview" aria-label="Logins to import">
+            <ul className="import-preview" aria-label="Items to import">
               {step.items.slice(0, 8).map((item, i) => (
                 <li key={i}>
                   <strong>{item.site}</strong>
@@ -204,7 +204,7 @@ function ImportSection({ items, importItems, onSessionExpired }: Props) {
               disabled={step.items.length === 0}
               onClick={runImport}
             >
-              Import {step.items.length} login{step.items.length === 1 ? '' : 's'}
+              Import {step.items.length} item{step.items.length === 1 ? '' : 's'}
             </button>
             <button
               type="button"
@@ -224,7 +224,7 @@ function ImportSection({ items, importItems, onSessionExpired }: Props) {
       {step.kind === 'done' && (
         <>
           <p className="notice" role="status">
-            Imported {step.count} login{step.count === 1 ? '' : 's'}.
+            Imported {step.count} item{step.count === 1 ? '' : 's'}.
           </p>
           {step.fromCsv && (
             <p className="warning">

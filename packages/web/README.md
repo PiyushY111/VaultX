@@ -53,6 +53,12 @@ the app and API share an origin and no CORS is needed. In production, serve
   `otpauth://` link is validated in the form (with the current code shown to
   check against the site) and the list shows the live code with a countdown
   and Copy. Imports put Bitwarden and 1Password TOTP secrets in this field.
+- **Item kinds:** logins, secure notes, cards and identities share one
+  encrypted format (`src/vault/items.ts`), with tags, favorites (sorted
+  first, filterable by chips) and, for logins, a password history kept inside
+  the item and shown in the edit form.
+- **Breach check** (`src/lib/breachCheck.ts`): opt-in from the health page,
+  Have I Been Pwned's k-anonymity range API; only hash prefixes are sent.
 - **Password health** (`src/lib/passwordHealth.ts`): flags weak passwords
   (zxcvbn below "Strong", with the site and username as context), passwords
   shared by several logins, and logins not saved in over a year. It runs

@@ -375,6 +375,16 @@ Replaying or rearranging previously valid ciphertexts or credentials.
   blank for writing the password by hand; it never contains the password.
 - Deleting an account removes it and every item from the database right
   away. Copies in the operator's backups are the operator's responsibility.
+- **The breach check tells a third party something.** It never sends a
+  password or a full hash, and the 5-character prefix matches roughly one in
+  a million passwords, so a single request reveals nothing useful. But Have
+  I Been Pwned (and anyone watching your network) learns that some browser
+  at your address checked some number of passwords. That's why it's a button,
+  not automatic.
+- **Password history is more to lose.** Old passwords stay in the item's
+  ciphertext (up to ten per login), so a compromised vault also exposes
+  passwords you may still use elsewhere. Users can clear an item's history
+  from its edit form.
 - **Two-factor secrets kept with their passwords.** Storing a site's TOTP
   secret next to its password is convenient, but it means whoever gets into
   the vault (a guessed master password, an unlocked device) gets both
