@@ -384,8 +384,17 @@ see site names, usernames, passwords, notes or search queries.
 ### Client-side item format (inside the ciphertext)
 
 ```json
-{ "v": 1, "site": "github.com", "username": "octocat", "password": "…", "notes": "…" }
+{ "v": 1, "site": "github.com", "username": "octocat", "password": "…", "notes": "…", "totp": "…" }
 ```
+
+`totp` is optional: the site's two-factor setup key (base32) or `otpauth://`
+link, as the user pasted it. It's left out of the JSON when empty, so items
+without one encrypt exactly as before. Codes are computed on the client
+(`packages/crypto/src/totp.ts`, RFC 6238 over WebCrypto HMAC; SHA-1/256/512,
+6–8 digits, any period). In the extension the secret stays in the
+background worker: the popup and content script only ever receive a code
+and its remaining seconds, under the same rules as passwords (matching
+host, https only, after a trusted click).
 
 `v` versions the format. The web vault and the extension share it, and a test
 in the extension package checks the two stay compatible. `site` may be a bare

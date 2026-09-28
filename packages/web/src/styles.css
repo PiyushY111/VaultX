@@ -991,3 +991,74 @@ button.link:hover {
   color: var(--silk);
   font: inherit;
 }
+
+/* Password health */
+.health-tiles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.health-tile {
+  display: flex;
+  align-items: baseline;
+  gap: 0.45rem;
+  padding: 0.6rem 0.9rem;
+  font: inherit;
+  color: var(--ash);
+  background: var(--night);
+  border: 1px solid var(--indigo-line);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+
+.health-tile strong {
+  font-family: var(--serif);
+  font-size: var(--step-2);
+  color: var(--silk);
+}
+
+.health-tile[aria-pressed='true'] {
+  border-color: var(--gold);
+  color: var(--silk);
+}
+
+.health-tile[data-kind='weak'] strong,
+.health-tile[data-kind='reused'] strong {
+  color: var(--vermilion-text);
+}
+
+.health-reasons {
+  margin: 0.35rem 0 0;
+  padding-left: 1rem;
+  font-size: var(--step--1);
+  color: var(--ash);
+}
+
+.health-reasons [data-kind='weak'],
+.health-reasons [data-kind='reused'] {
+  color: var(--vermilion-text);
+}
+
+/* Two-factor code in a vault entry, with a ring that empties as it expires. */
+.entry-totp {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.2rem;
+}
+
+.entry-totp code {
+  font-family: var(--mono);
+  font-size: var(--step-1);
+  letter-spacing: 0.08em;
+  color: var(--gold-bright);
+}
+
+.totp-ring {
+  --left: 1;
+  width: 0.9rem;
+  height: 0.9rem;
+  border-radius: 50%;
+  background: conic-gradient(var(--gold) calc(var(--left) * 360deg), var(--indigo-line) 0);
+}

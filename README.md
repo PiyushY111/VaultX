@@ -23,6 +23,11 @@ vault, stay on your devices:
 - **Import from Chrome, Firefox, Bitwarden or 1Password** (their CSV
   exports), and **export an encrypted backup** that restores into any
   VaultX account.
+- **A password health report** flags weak, reused and old passwords,
+  checked entirely on your device.
+- **Two-factor codes for sites:** save a site's setup key with its login and
+  the vault shows the live 6-digit code; the extension can fill it on the
+  site's 2FA page.
 - **The server stores opaque blobs.** Integration tests scan every raw
   database row to confirm no plaintext or key material is ever stored.
 

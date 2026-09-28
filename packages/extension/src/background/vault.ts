@@ -1,6 +1,8 @@
 import {
   DecryptionError,
   checkAgainstManifest,
+  parseTotp,
+  totpCode,
   decryptManifest,
   decryptVaultKey,
   deriveKeys,
@@ -15,6 +17,7 @@ import type {
   PendingSavePrompt,
   PopupItem,
   Settings,
+  TotpCodeResponse,
   VaultWarnings,
 } from '../shared/messages';
 import { securePageHost, siteMatchesHost } from '../shared/urls';
@@ -27,7 +30,14 @@ import {
   type ManifestPayload,
   type SecondFactor,
 } from './api';
-import { decryptVaultItems, encryptVaultItem, type VaultItem, type VaultItemData } from './items';
+import {
+  decryptVaultItems,
+  encryptVaultItem,
+  isLogin,
+  withPasswordHistory,
+  type VaultItem,
+  type VaultItemData,
+} from './items';
 import { createRevisionLedger } from './revisions';
 import type { KeyValueStore } from './storage';
 
@@ -402,18 +412,59 @@ export class Vault {
     return this.warnings;
   }
 
+  /** The vault's logins. Notes, cards and identities live in the web vault only. */
+  private async getLogins(): Promise<VaultItem[]> {
+    return (await this.getItems()).filter(isLogin);
+  }
+
   async listForPopup(): Promise<PopupItem[]> {
-    const items = await this.getItems();
+    const items = await this.getLogins();
     return items
-      .map(({ id, site, username, password, notes }) => ({ id, site, username, password, notes }))
+      .map(({ id, site, username, password, notes, totp }) => ({
+        id,
+        site,
+        username,
+        password,
+        notes,
+        hasTotp: Boolean(totp),
+      }))
       .sort((a, b) => a.site.localeCompare(b.site, undefined, { sensitivity: 'base' }));
+  }
+
+  private async totpCodeOf(item: VaultItem | undefined): Promise<TotpCodeResponse> {
+    if (!item?.totp) throw new Error('That login has no two-factor code');
+    return totpCode(parseTotp(item.totp), this.deps.now());
+  }
+
+  /** The current two-factor code of an item, for the popup (a trusted extension page). */
+  async totpCodeForPopup(itemId: string): Promise<TotpCodeResponse> {
+    return this.totpCodeOf((await this.getItems()).find((item) => item.id === itemId));
+  }
+
+  /** Items matching a page that have a two-factor secret: usernames only. */
+  async totpMatchesForUrl(pageUrl: string): Promise<ItemSummary[]> {
+    const host = securePageHost(pageUrl);
+    if (!host) return [];
+    return (await this.getLogins())
+      .filter((item) => item.totp && siteMatchesHost(item.site, host))
+      .map(({ id, site, username }) => ({ id, site, username }));
+  }
+
+  /** The current code for an item, only if it matches the (browser-reported) page URL. */
+  async totpCodeForUrl(itemId: string, pageUrl: string): Promise<TotpCodeResponse> {
+    const host = securePageHost(pageUrl);
+    if (!host) throw new Error('Autofill is only available on https pages');
+    const item = (await this.getLogins()).find((candidate) => candidate.id === itemId);
+    if (!item || !siteMatchesHost(item.site, host))
+      throw new Error('No matching login for this site');
+    return this.totpCodeOf(item);
   }
 
   /** Usernames of items matching a page — never passwords. Empty for insecure or non-web URLs. */
   async matchesForUrl(pageUrl: string): Promise<ItemSummary[]> {
     const host = securePageHost(pageUrl);
     if (!host) return [];
-    const items = await this.getItems();
+    const items = await this.getLogins();
     return items
       .filter((item) => siteMatchesHost(item.site, host))
       .map(({ id, site, username }) => ({ id, site, username }));
@@ -426,7 +477,7 @@ export class Vault {
   ): Promise<{ username: string; password: string; host: string }> {
     const host = securePageHost(pageUrl);
     if (!host) throw new Error('Autofill is only available on https pages');
-    const item = (await this.getItems()).find((candidate) => candidate.id === itemId);
+    const item = (await this.getLogins()).find((candidate) => candidate.id === itemId);
     if (!item || !siteMatchesHost(item.site, host))
       throw new Error('No matching login for this site');
     return { username: item.username, password: item.password, host };
@@ -444,7 +495,7 @@ export class Vault {
   ): Promise<void> {
     const host = securePageHost(pageUrl);
     if (!host || !password || !(await this.isUnlocked())) return;
-    const existing = (await this.getItems()).find(
+    const existing = (await this.getLogins()).find(
       (item) => siteMatchesHost(item.site, host) && item.username === username,
     );
     if (existing?.password === password) {
@@ -487,7 +538,13 @@ export class Vault {
     if (pending.itemId) {
       const itemId = pending.itemId;
       await this.saveItem(
-        (current) => current && { ...current, password: pending.password },
+        (current) =>
+          current &&
+          withPasswordHistory(
+            current,
+            { ...current, password: pending.password },
+            new Date(this.deps.now()),
+          ),
         itemId,
       );
     } else {
@@ -552,15 +609,7 @@ export class Vault {
       await ledger.record([response]);
       await ledger.recordManifest(manifest.version);
       this.manifest = manifest;
-      const { site, username, password, notes } = data;
-      const saved: VaultItem = {
-        id: response.id,
-        revision: response.revision,
-        site,
-        username,
-        password,
-        notes,
-      };
+      const saved: VaultItem = { ...data, id: response.id, revision: response.revision };
       this.items = existing
         ? items.map((item) => (item.id === existing.id ? saved : item))
         : [...items, saved];

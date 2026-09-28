@@ -1,4 +1,5 @@
 import { parseCsv } from '../lib/csv';
+import { readTotp } from '../lib/useTotp';
 import type { VaultItemData } from './items';
 
 /**
@@ -94,13 +95,23 @@ export function parseImport(text: string): ParsedImport {
       skipped++;
       continue;
     }
-    // There's no separate field for these yet, so keep them in the notes.
+    // There's no separate field for the name, so keep it in the notes.
     const extras = [
       name && name.toLowerCase() !== site.toLowerCase() && name !== url ? `Name: ${name}` : '',
-      get(at.totp) ? `TOTP: ${get(at.totp)}` : '',
     ].filter(Boolean);
     const notes = [get(at.notes), ...extras].filter(Boolean).join('\n');
-    items.push({ site, username, password, notes });
+    const totp = get(at.totp);
+    // A secret that doesn't parse still goes in, in the notes, so nothing is lost.
+    if (totp && typeof readTotp(totp) === 'string') {
+      items.push({
+        site,
+        username,
+        password,
+        notes: [notes, `TOTP: ${totp}`].filter(Boolean).join('\n'),
+      });
+    } else {
+      items.push({ site, username, password, notes, ...(totp && { totp }) });
+    }
   }
   return { source: detectSource(headers), items, skipped };
 }

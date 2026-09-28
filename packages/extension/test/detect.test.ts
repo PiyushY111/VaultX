@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   fillLogin,
   findLoginFields,
+  findOtpField,
   findUsernameField,
   readSubmittedCredential,
 } from '../src/content/detect';
@@ -120,5 +121,29 @@ describe('readSubmittedCredential', () => {
   it('returns null when no password was entered', () => {
     html(`<form id="f"><input type="text" value="alice"><input type="password"></form>`);
     expect(readSubmittedCredential(document.getElementById('f')!)).toBeNull();
+  });
+});
+
+describe('findOtpField', () => {
+  it.each([
+    ['autocomplete="one-time-code"', '<input id="x" autocomplete="one-time-code">'],
+    ['a name like otp_code', '<input id="x" name="otp_code" maxlength="6">'],
+    ['a camelCase id like totpCode', '<input id="x" name="totpCode" inputmode="numeric">'],
+    ['a label', '<label for="x">Authentication code</label><input id="x" type="tel">'],
+    ['a placeholder', '<input id="x" placeholder="6-digit 2FA code">'],
+  ])('finds a code field by %s', (_, markup) => {
+    html(`<form>${markup}</form>`);
+    expect(findOtpField(document)?.id).toBe('x');
+  });
+
+  it.each([
+    ['a login form', '<input name="otp"><input type="password">'],
+    ['an ordinary text field', '<input name="search" placeholder="Search">'],
+    ['a word that merely contains "otp"', '<input name="footprint">'],
+    ['a code field too long for a code', '<input name="otp" maxlength="20">'],
+    ['a hidden code field', '<input name="otp" hidden>'],
+  ])('ignores %s', (_, markup) => {
+    html(`<form>${markup}</form>`);
+    expect(findOtpField(document)).toBeNull();
   });
 });

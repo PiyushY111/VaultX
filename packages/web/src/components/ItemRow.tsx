@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { CLIPBOARD_CLEAR_MS, copySecret } from '../lib/clipboard';
+import { groupDigits, useTotp } from '../lib/useTotp';
 import type { VaultItem } from '../vault/items';
 
 interface Props {
@@ -17,6 +18,19 @@ function crestLetter(site: string): string {
 export function ItemRow({ item, onEdit, onDelete }: Props) {
   const [revealed, setRevealed] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [copiedCode, setCopiedCode] = useState(false);
+  const totp = useTotp(item.totp);
+
+  async function copyCode() {
+    if (totp.kind !== 'code') return;
+    try {
+      await copySecret(totp.code);
+      setCopiedCode(true);
+      setTimeout(() => setCopiedCode(false), 2000);
+    } catch {
+      // Clipboard permission denied.
+    }
+  }
 
   async function copyPassword() {
     try {
@@ -39,6 +53,23 @@ export function ItemRow({ item, onEdit, onDelete }: Props) {
         <code className={revealed ? 'entry-secret is-revealed' : 'entry-secret'}>
           {revealed ? item.password : '••••••••••••'}
         </code>
+        {totp.kind === 'code' && (
+          <span className="entry-totp">
+            <code aria-label="Two-factor code">{groupDigits(totp.code)}</code>
+            <span
+              className="totp-ring"
+              role="timer"
+              aria-label={`${totp.secondsLeft} seconds left`}
+              style={{ ['--left' as string]: totp.secondsLeft / totp.period }}
+            />
+            <button type="button" className="btn btn-quiet" onClick={copyCode}>
+              {copiedCode ? 'Copied' : 'Copy code'}
+            </button>
+          </span>
+        )}
+        {totp.kind === 'invalid' && (
+          <span className="entry-notes">Two-factor setup key is invalid: {totp.message}</span>
+        )}
         {item.notes && <p className="entry-notes">{item.notes}</p>}
       </div>
       <div className="entry-actions">

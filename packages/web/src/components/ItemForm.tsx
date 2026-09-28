@@ -1,5 +1,6 @@
 import { useId, useState, type FormEvent } from 'react';
 import { usePasswordStrength } from '../lib/passwordStrength';
+import { groupDigits, readTotp, useTotp } from '../lib/useTotp';
 import type { VaultItemData } from '../vault/items';
 import { PasswordGenerator } from './PasswordGenerator';
 import { StrengthMeter } from './StrengthMeter';
@@ -21,15 +22,24 @@ export function ItemForm({ initial, isNew, onSave, onCancel }: Props) {
   // Advice only: a site may force a weak password on you.
   const strength = usePasswordStrength(data.password, [data.site, data.username]);
 
+  const totp = useTotp(data.totp);
+  const totpId = useId();
+
   const set = (field: keyof VaultItemData) => (event: { target: { value: string } }) =>
     setData((prev) => ({ ...prev, [field]: event.target.value }));
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
+    const parsedTotp = readTotp(data.totp ?? '');
+    if (typeof parsedTotp === 'string') {
+      setError(`Two-factor setup key: ${parsedTotp}`);
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
-      await onSave(data);
+      const { totp: rawTotp, ...rest } = data;
+      await onSave(parsedTotp && rawTotp ? { ...rest, totp: rawTotp.trim() } : rest);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Save failed');
       setBusy(false);
@@ -80,6 +90,26 @@ export function ItemForm({ initial, isNew, onSave, onCancel }: Props) {
           }}
         />
       )}
+      <div className="field">
+        <label htmlFor={totpId}>Two-factor setup key (optional)</label>
+        <input
+          id={totpId}
+          className="secret-input"
+          autoComplete="off"
+          spellCheck={false}
+          placeholder="Setup key or otpauth:// link"
+          value={data.totp ?? ''}
+          onChange={set('totp')}
+          aria-describedby={`${totpId}-hint`}
+        />
+        <p className="hint" id={`${totpId}-hint`}>
+          {totp.kind === 'code'
+            ? `Current code: ${groupDigits(totp.code)}${totp.config.issuer ? ` (${totp.config.issuer})` : ''}. Check it matches the site before saving.`
+            : totp.kind === 'invalid'
+              ? totp.message
+              : 'When a site shows a QR code to set up two-factor login, choose “enter the key manually” and paste the key here. VaultX will then show the site’s codes.'}
+        </p>
+      </div>
       <label>
         Notes
         <textarea rows={4} value={data.notes} onChange={set('notes')} />

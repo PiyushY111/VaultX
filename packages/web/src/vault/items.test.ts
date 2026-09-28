@@ -59,6 +59,28 @@ describe('serializeItem / parseItem', () => {
   });
 });
 
+describe('two-factor secrets in items', () => {
+  const data = { site: 'github.com', username: 'u', password: 'p', notes: '' };
+
+  it('are left out of the JSON when empty, so older items encrypt exactly as before', () => {
+    expect(serializeItem(data)).toBe(
+      '{"v":1,"site":"github.com","username":"u","password":"p","notes":""}',
+    );
+    expect(serializeItem({ ...data, totp: '' })).toBe(serializeItem(data));
+    expect(parseItem(serializeItem(data))).toEqual(data);
+  });
+
+  it('round-trip when set', () => {
+    const withTotp = { ...data, totp: 'JBSWY3DPEHPK3PXP' };
+    expect(JSON.parse(serializeItem(withTotp)).totp).toBe('JBSWY3DPEHPK3PXP');
+    expect(parseItem(serializeItem(withTotp))).toEqual(withTotp);
+  });
+
+  it('must be a string', () => {
+    expect(() => parseItem(JSON.stringify({ v: 1, ...data, totp: 5 }))).toThrow(/totp/);
+  });
+});
+
 describe('filterItems', () => {
   const items = [
     item('GitHub', 'octocat', 'work account', 'secret-github'),

@@ -12,6 +12,7 @@ import {
   type VaultWarnings,
 } from '../vault/sync';
 import { EmergencyKit } from './EmergencyKit';
+import { HealthPanel } from './HealthPanel';
 import { Emblem, KeyholeIcon } from './Emblem';
 import { ItemForm } from './ItemForm';
 import { ItemRow } from './ItemRow';
@@ -31,7 +32,11 @@ interface Props {
   justSignedUp?: boolean;
 }
 
-type Editing = { mode: 'new' } | { mode: 'edit'; item: VaultItem } | null;
+/** `from` is where to go back to when the form closes. */
+type Editing = { mode: 'new' } | { mode: 'edit'; item: VaultItem; from?: View } | null;
+
+/** The screen shown instead of the item list. */
+type View = 'vault' | 'security' | 'transfer' | 'health';
 
 const SESSION_EXPIRED = 'Your session expired. Enter your master password to continue.';
 
@@ -70,8 +75,7 @@ export function VaultView({
   const [query, setQuery] = useState('');
   const [editing, setEditing] = useState<Editing>(null);
   const [showGenerator, setShowGenerator] = useState(false);
-  const [showSecurity, setShowSecurity] = useState(false);
-  const [showTransfer, setShowTransfer] = useState(false);
+  const [view, setView] = useState<View>('vault');
   const [showKit, setShowKit] = useState(justSignedUp);
   const [error, setError] = useState<string | null>(null);
   const ledger = useMemo(() => createRevisionLedger(session.email), [session.email]);
@@ -104,6 +108,11 @@ export function VaultView({
   // Search runs over the decrypted items in memory; the query never leaves the browser.
   const visible = useMemo(() => filterItems(items ?? [], query), [items, query]);
 
+  function closeEditor() {
+    if (editing?.mode === 'edit' && editing.from) setView(editing.from);
+    setEditing(null);
+  }
+
   async function save(data: VaultItemData) {
     try {
       if (editing?.mode === 'edit') {
@@ -113,7 +122,7 @@ export function VaultView({
         const saved = await sync.current!.create(data);
         setItems((prev) => [...(prev ?? []), saved]);
       }
-      setEditing(null);
+      closeEditor();
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) onLock(SESSION_EXPIRED);
       if (isStaleRevision(err) || err instanceof VaultChangedError) {
@@ -172,11 +181,10 @@ export function VaultView({
           <button
             type="button"
             className="btn btn-quiet"
-            aria-pressed={showSecurity}
+            aria-pressed={view === 'security'}
             onClick={() => {
               setEditing(null);
-              setShowTransfer(false);
-              setShowSecurity((v) => !v);
+              setView((current) => (current === 'security' ? 'vault' : 'security'));
             }}
           >
             Security
@@ -204,7 +212,16 @@ export function VaultView({
           <EmergencyKit email={session.email} onDone={() => setShowKit(false)} firstTime />
         )}
 
-        {showTransfer ? (
+        {view === 'health' ? (
+          <HealthPanel
+            items={items}
+            onEdit={(item) => {
+              setView('vault');
+              setEditing({ mode: 'edit', item, from: 'health' });
+            }}
+            onClose={() => setView('vault')}
+          />
+        ) : view === 'transfer' ? (
           <TransferPanel
             session={session}
             items={items}
@@ -220,9 +237,9 @@ export function VaultView({
               }
             }}
             onSessionExpired={() => onLock(SESSION_EXPIRED)}
-            onClose={() => setShowTransfer(false)}
+            onClose={() => setView('vault')}
           />
-        ) : showSecurity ? (
+        ) : view === 'security' ? (
           <SecurityPanel
             session={session}
             items={items}
@@ -238,13 +255,13 @@ export function VaultView({
               setItems(updated);
             }}
             onShowEmergencyKit={() => {
-              setShowSecurity(false);
+              setView('vault');
               setShowKit(true);
             }}
             onSignedOutEverywhere={onLogOut}
             onAccountDeleted={onAccountDeleted}
             onSessionExpired={() => onLock(SESSION_EXPIRED)}
-            onClose={() => setShowSecurity(false)}
+            onClose={() => setView('vault')}
           />
         ) : editing ? (
           <ItemForm
@@ -252,7 +269,7 @@ export function VaultView({
             initial={editing.mode === 'edit' ? editing.item : emptyItem()}
             isNew={editing.mode === 'new'}
             onSave={save}
-            onCancel={() => setEditing(null)}
+            onCancel={closeEditor}
           />
         ) : (
           <>
@@ -283,15 +300,11 @@ export function VaultView({
               >
                 Add item
               </button>
-              <button
-                type="button"
-                className="btn"
-                onClick={() => {
-                  setShowSecurity(false);
-                  setShowTransfer(true);
-                }}
-              >
+              <button type="button" className="btn" onClick={() => setView('transfer')}>
                 Import / export
+              </button>
+              <button type="button" className="btn" onClick={() => setView('health')}>
+                Password health
               </button>
               <button
                 type="button"

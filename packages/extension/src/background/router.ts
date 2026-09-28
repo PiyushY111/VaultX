@@ -131,6 +131,8 @@ async function handlePopup(request: PopupRequest, deps: RouterDeps): Promise<Res
     }
     case 'getWarnings':
       return ok(await vault.vaultWarnings());
+    case 'getTotpCode':
+      return ok(await vault.totpCodeForPopup(String(request.itemId)));
     case 'lock':
       await vault.lock();
       return ok(null);
@@ -195,6 +197,13 @@ async function handleContent(
       return ok(null);
     case 'getPendingSave':
       return ok(await vault.pendingSavePrompt(sender.tabId));
+    case 'getTotpMatches':
+      if (!(await vault.isUnlocked())) return { ok: false, error: 'Vault is locked', locked: true };
+      return ok(await vault.totpMatchesForUrl(sender.url));
+    case 'fillTotp':
+      // Only reached from a trusted click on our in-page prompt; counts as activity.
+      await vault.touch();
+      return ok(await vault.totpCodeForUrl(String(request.itemId), sender.url));
     case 'resolvePendingSave':
       await vault.touch();
       await vault.resolvePendingSave(sender.tabId, request.save === true);

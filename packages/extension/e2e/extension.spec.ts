@@ -34,6 +34,12 @@ const LOGIN_PAGE = `<!doctype html><title>Test login</title><h1>Sign in</h1>
   <button type="submit">Sign in</button>
 </form>`;
 
+const TWO_FACTOR_PAGE = `<!doctype html><title>Two-factor</title><h1>Enter your code</h1>
+<form method="post" action="/welcome">
+  <label>Authentication code <input id="otp" name="otp" autocomplete="one-time-code" inputmode="numeric"></label>
+  <button type="submit">Verify</button>
+</form>`;
+
 let site: Server;
 let sitePort: number;
 
@@ -43,7 +49,9 @@ base.beforeAll(async () => {
     response.end(
       request.url?.startsWith('/welcome')
         ? '<!doctype html><title>Welcome</title><h1>Welcome</h1>'
-        : LOGIN_PAGE,
+        : request.url?.startsWith('/2fa')
+          ? TWO_FACTOR_PAGE
+          : LOGIN_PAGE,
     );
   });
   await new Promise<void>((resolve) => site.listen(0, '127.0.0.1', resolve));
@@ -112,7 +120,7 @@ async function apiToken(account: Account): Promise<string> {
 
 async function addItem(
   account: Account,
-  data: { site: string; username: string; password: string },
+  data: { site: string; username: string; password: string; totp?: string },
 ) {
   const id = crypto.randomUUID();
   const token = await apiToken(account);
@@ -508,6 +516,29 @@ test('unlocks with a two-factor code in the popup', async ({ userDataDir }) => {
     await expect(popup.getByText(`Unlocked as ${account.email}`)).toBeVisible();
     await expect(popup.getByRole('listitem', { name: '2fa.example.com' })).toBeVisible();
     await expect(popup.getByRole('alert', { name: 'Vault warnings' })).toBeHidden();
+  } finally {
+    await context.close();
+  }
+});
+
+test('fills a two-factor code on the site’s 2FA page, after a click', async ({ userDataDir }) => {
+  const account = await createAccount();
+  const SECRET = 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ';
+  await addItem(account, { site: '127.0.0.1', username: 'mfa-user', password: 'pw', totp: SECRET });
+  const { context, extensionId } = await launch(userDataDir);
+  try {
+    const popup = await openPopup(context, extensionId);
+    await unlockInPopup(popup, account);
+    // The popup shows the live code for the login.
+    const row = popup.getByRole('listitem', { name: '127.0.0.1' });
+    await expect(row.getByLabel('Two-factor code')).toHaveText(/^\d{3} \d{3}$/);
+
+    const page = await context.newPage();
+    await page.goto(`http://127.0.0.1:${sitePort}/2fa`);
+    await expectPrompt(page, /Fill two-factor code\?.*mfa-user/);
+    await expect(page.locator('#otp')).toHaveValue('');
+    await clickPromptButton(page, 'Fill code');
+    await expect(page.locator('#otp')).toHaveValue(totp(SECRET));
   } finally {
     await context.close();
   }

@@ -375,6 +375,12 @@ Replaying or rearranging previously valid ciphertexts or credentials.
   blank for writing the password by hand; it never contains the password.
 - Deleting an account removes it and every item from the database right
   away. Copies in the operator's backups are the operator's responsibility.
+- **Two-factor secrets kept with their passwords.** Storing a site's TOTP
+  secret next to its password is convenient, but it means whoever gets into
+  the vault (a guessed master password, an unlocked device) gets both
+  factors at once. That's a real reduction from a separate authenticator
+  app. Users who want the second factor to stay separate should leave the
+  field empty for their most important accounts.
 - **Files you import or export.** Other managers' CSV exports are plaintext:
   VaultX reads them locally and reminds you to delete them, but can't
   delete them for you. An exported backup is encrypted, but whoever gets

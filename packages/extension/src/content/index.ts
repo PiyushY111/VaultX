@@ -56,10 +56,17 @@ import type {
   ItemSummary,
   PendingSavePrompt,
   Response,
+  TotpCodeResponse,
   VaultUnlockedMessage,
 } from '../shared/messages';
 import { securePageHost } from '../shared/urls';
-import { fillLogin, findLoginFields, readSubmittedCredential } from './detect';
+import {
+  fillLogin,
+  findLoginFields,
+  findOtpField,
+  readSubmittedCredential,
+  setFieldValue,
+} from './detect';
 import { Prompt } from './ui';
 
 const SCAN_DEBOUNCE_MS = 400;
@@ -80,6 +87,7 @@ function main(): void {
 
   const prompt = new Prompt();
   let offeredFill = false;
+  let offeredTotp = false;
   let showedLocked = false;
   let dismissed = false;
   let savePromptShown = false;
@@ -93,8 +101,8 @@ function main(): void {
   }
 
   async function offerFill(): Promise<void> {
-    if (offeredFill || dismissed || savePromptShown || findLoginFields(document).length === 0)
-      return;
+    if (offeredFill || dismissed || savePromptShown) return;
+    if (findLoginFields(document).length === 0) return offerTotp();
     offeredFill = true;
     const response = await send<ItemSummary[]>({ type: 'getMatches' });
     if (!response.ok) {
@@ -140,6 +148,46 @@ function main(): void {
       return;
     }
     fillFirstForm(response.data.username, response.data.password);
+    prompt.hide();
+  }
+
+  /** A two-factor step: offer the saved code for this site, if there is one. */
+  async function offerTotp(): Promise<void> {
+    if (offeredTotp || !findOtpField(document)) return;
+    offeredTotp = true;
+    const response = await send<ItemSummary[]>({ type: 'getTotpMatches' });
+    if (!response.ok || response.data.length === 0) return;
+    const matches = response.data;
+    prompt.show({
+      message: 'Fill two-factor code?',
+      detail: matches.length === 1 ? matches[0]!.username || location.hostname : location.hostname,
+      choices: matches.map((match) => ({
+        value: match.id,
+        label: match.username || '(no username)',
+      })),
+      actions: [
+        { label: 'Not now', onClick: dismiss },
+        {
+          label: 'Fill code',
+          primary: true,
+          onClick: () => void fillTotp(prompt.selection ?? matches[0]!.id),
+        },
+      ],
+    });
+  }
+
+  async function fillTotp(itemId: string): Promise<void> {
+    const field = findOtpField(document);
+    const response = await send<TotpCodeResponse>({ type: 'fillTotp', itemId });
+    if (!response.ok || !field) {
+      prompt.show({
+        message: 'Could not fill the code',
+        detail: response.ok ? 'The code field is gone.' : response.error,
+        actions: [{ label: 'Close', onClick: dismiss }],
+      });
+      return;
+    }
+    setFieldValue(field, response.data.code);
     prompt.hide();
   }
 

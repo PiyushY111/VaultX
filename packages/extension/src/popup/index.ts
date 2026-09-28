@@ -10,6 +10,7 @@ import type {
   PopupRequest,
   Response,
   Settings,
+  TotpCodeResponse,
   VaultState,
   VaultWarnings,
 } from '../shared/messages';
@@ -420,6 +421,54 @@ async function renderVault(state: VaultState): Promise<void> {
   }
 }
 
+/** Six digits in two groups, as authenticator apps show them. */
+const groupDigits = (code: string) => code.replace(/^(\d{3,4})(\d{3,4})$/, '$1 $2');
+
+/**
+ * The item's current two-factor code, refreshed as each one expires. The
+ * background computes it; the secret itself never reaches the popup.
+ */
+function totpLine(
+  item: PopupItem,
+  status: HTMLElement,
+  copy: (value: string, button: HTMLButtonElement, secret: boolean) => Promise<void>,
+): HTMLElement {
+  const code = h('code', { class: 'totp-code', 'aria-label': 'Two-factor code' }, '••• •••');
+  const left = h('span', { class: 'muted totp-left' });
+  let current = '';
+  const button = h(
+    'button',
+    { type: 'button', class: 'btn btn-quiet', 'data-label': 'Copy code' },
+    'Copy code',
+  );
+  button.addEventListener('click', () => void (current && copy(current, button, true)));
+  const line = h('div', { class: 'totp' }, code, left, button);
+
+  let expiresAt = 0;
+  const refresh = async () => {
+    if (!line.isConnected && current) return; // Row was replaced (e.g. by a search).
+    try {
+      const next = await send<TotpCodeResponse>({ type: 'getTotpCode', itemId: item.id });
+      current = next.code;
+      code.textContent = groupDigits(next.code);
+      expiresAt = Date.now() + next.secondsLeft * 1000;
+    } catch (error) {
+      onRequestError(error, (message) => (status.textContent = message));
+      return;
+    }
+    tick();
+  };
+  const tick = () => {
+    if (!line.isConnected && current) return;
+    const seconds = Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000));
+    left.textContent = `${seconds}s`;
+    if (seconds === 0) void refresh();
+    else setTimeout(tick, 1000);
+  };
+  void refresh();
+  return line;
+}
+
 function itemRow(item: PopupItem, status: HTMLElement): HTMLLIElement {
   const secret = h('code', { class: 'secret' }, '••••••••');
   let revealed = false;
@@ -458,6 +507,7 @@ function itemRow(item: PopupItem, status: HTMLElement): HTMLLIElement {
       h('strong', { class: 'entry-site' }, item.site),
       item.username && h('span', { class: 'entry-user' }, item.username),
       secret,
+      item.hasTotp && totpLine(item, status, copy),
     ),
     h(
       'div',

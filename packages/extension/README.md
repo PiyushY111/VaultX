@@ -46,6 +46,13 @@ After rebuilding, click the reload icon on the extension's card.
 - **Two-factor:** if the account has it on, the popup asks for the code after
   the password. The derived keys wait in the background worker's memory
   (never storage) for up to five minutes.
+- **Two-factor codes:** the popup shows a login's live code (computed in the
+  background; the secret never reaches the popup). On a site's 2FA page
+  (`findOtpField` in `src/content/detect.ts`: an `autocomplete="one-time-code"`
+  field, or a short field named/labelled like a code, with no password field
+  present) the content script offers to fill the code for a matching login,
+  after a click, like passwords. Sites that split the code into one box per
+  digit aren't recognized.
 - **Integrity checks:** the vault is checked against its encrypted manifest
   like the web vault's, and every write sends the next manifest. The popup
   warns about anything hidden, added, rolled back, or undecryptable.

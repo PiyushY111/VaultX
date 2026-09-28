@@ -49,6 +49,16 @@ the app and API share an origin and no CORS is needed. In production, serve
   password, and a two-factor code if that's on.
 - **Emergency kit:** offered after signup and from the Security page, to
   print or download. It never contains the master password.
+- **Two-factor codes** (`src/lib/useTotp.ts`): an item's setup key or
+  `otpauth://` link is validated in the form (with the current code shown to
+  check against the site) and the list shows the live code with a countdown
+  and Copy. Imports put Bitwarden and 1Password TOTP secrets in this field.
+- **Password health** (`src/lib/passwordHealth.ts`): flags weak passwords
+  (zxcvbn below "Strong", with the site and username as context), passwords
+  shared by several logins, and logins not saved in over a year. It runs
+  over the decrypted items in memory and sends nothing; the report never
+  shows the passwords. ("Old" uses the item's last save, since password
+  changes aren't recorded separately.)
 - **Import / export:** CSV exports from Chrome (Edge, Brave), Firefox,
   Bitwarden and 1Password are parsed in the browser (`src/vault/importers.ts`),
   previewed, de-duplicated against the vault, encrypted, and saved in

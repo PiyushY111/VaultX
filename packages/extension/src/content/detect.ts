@@ -85,3 +85,39 @@ export function readSubmittedCredential(
   const username = findUsernameField(passwords[0]!)?.value.trim() ?? '';
   return { username, password: password.value };
 }
+
+const OTP_HINT =
+  /\b(otp|totp|2fa|mfa|one ?time|verification code|auth(entication)? code|security code|two factor|mfa code)\b/i;
+
+/** "totpCode", "otp_code" and "mfa-code" → "totp Code", "otp code", "mfa code", so \b matches. */
+const words = (text: string) => text.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[_-]+/g, ' ');
+
+/**
+ * The field on a two-factor step that wants a 6–8 digit code, if the page
+ * has one and no password field (that's a login form instead). Sites that
+ * split the code into one box per digit aren't recognized.
+ */
+export function findOtpField(doc: Document): HTMLInputElement | null {
+  if (findLoginFields(doc).length > 0) return null;
+  const inputs = [
+    ...doc.querySelectorAll<HTMLInputElement>(
+      'input:not([type]), input[type="text"], input[type="tel"], input[type="number"]',
+    ),
+  ].filter(isUsable);
+  const byAutocomplete = inputs.find((input) => input.autocomplete === 'one-time-code');
+  if (byAutocomplete) return byAutocomplete;
+  return (
+    inputs.find((input) => {
+      const described = [
+        input.name,
+        input.id,
+        input.placeholder,
+        input.getAttribute('aria-label') ?? '',
+        input.labels?.[0]?.textContent ?? '',
+      ].join(' ');
+      const maxLength = input.maxLength;
+      const codeSized = maxLength === -1 || (maxLength >= 6 && maxLength <= 8);
+      return codeSized && OTP_HINT.test(words(described));
+    }) ?? null
+  );
+}

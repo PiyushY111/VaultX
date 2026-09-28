@@ -1,6 +1,7 @@
 import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { parseTotp, totpCode } from '@password-manager/crypto';
 import sodium from 'libsodium-wrappers-sumo';
 import { FAKE_TOTP_CODE, installFakeServer, type FakeServer } from '../test/fakeServer';
 import { App } from './App';
@@ -575,5 +576,87 @@ news.example.org,https://news.example.org/login,reader,CSV-IMPORTED-PW,
       new File(['hello,world\n1,2\n'], 'notes.csv', { type: 'text/csv' }),
     );
     expect(await within(importer).findByRole('alert')).toHaveTextContent(/password column/);
+  });
+});
+
+describe('password health', () => {
+  it('flags weak, reused and old passwords, and fixes one from the report', async () => {
+    const user = userEvent.setup();
+    await signUpAndAddItem(user); // github.com, ITEM-PW-hunter2-xyz
+
+    // A second login reusing the same password, then make the first one old.
+    await user.click(screen.getByRole('button', { name: 'Add item' }));
+    const form = screen.getByRole('form', { name: 'Add item' });
+    await user.type(within(form).getByLabelText('Site'), 'gitlab.com');
+    await user.type(within(form).getByLabelText('Password'), ITEM.password);
+    await user.click(within(form).getByRole('button', { name: 'Save' }));
+    await screen.findByRole('listitem', { name: 'gitlab.com' });
+    const github = [...server.items.values()].find((stored) => stored.revision === 1)!;
+    github.updated_at = '2020-01-01T00:00:00.000Z';
+    await user.click(screen.getByRole('button', { name: 'Lock now' }));
+    await unlock(user, PASSWORD);
+    await screen.findByRole('listitem', { name: ITEM.site }, { timeout: 10_000 });
+
+    await user.click(screen.getByRole('button', { name: 'Password health' }));
+    const panel = screen.getByRole('region', { name: 'Password health' });
+    expect(await within(panel).findByRole('status')).toHaveTextContent(
+      '2 logins of 2 could use a better password.',
+    );
+    expect(within(panel).getByRole('button', { name: '2 Reused' })).toBeInTheDocument();
+    expect(within(panel).getByRole('button', { name: '1 Old' })).toBeInTheDocument();
+    // The report never shows the passwords themselves.
+    expect(panel.textContent).not.toContain(ITEM.password);
+
+    await user.click(within(panel).getByRole('button', { name: '1 Old' }));
+    const toFix = within(panel).getAllByRole('listitem', { name: /\.com$/ });
+    expect(toFix.map((li) => li.getAttribute('aria-label'))).toEqual([ITEM.site]);
+    expect(toFix[0]).toHaveTextContent('Same password as 1 other login');
+    expect(toFix[0]).toHaveTextContent(/Not saved in \d+ months/);
+
+    // Fix it with the generator; the report updates when the form closes.
+    await user.click(within(toFix[0]!).getByRole('button', { name: 'Change password' }));
+    const edit = screen.getByRole('form', { name: 'Edit item' });
+    await user.click(within(edit).getByRole('button', { name: 'Generate…' }));
+    await user.click(within(edit).getByRole('button', { name: 'Use this password' }));
+    await user.click(within(edit).getByRole('button', { name: 'Save' }));
+    const after = await screen.findByRole('region', { name: 'Password health' });
+    await waitFor(() =>
+      expect(within(after).getByRole('status')).toHaveTextContent('All 2 passwords look good.'),
+    );
+  });
+});
+
+describe('two-factor codes in items', () => {
+  // RFC 6238's SHA-1 test secret, in base32.
+  const SETUP_KEY = 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ';
+
+  it('shows the site’s live code, and refuses an invalid setup key', async () => {
+    const user = userEvent.setup();
+    await signUpAndAddItem(user);
+
+    const row = screen.getByRole('listitem', { name: ITEM.site });
+    await user.click(within(row).getByRole('button', { name: 'Edit' }));
+    const form = screen.getByRole('form', { name: 'Edit item' });
+    const field = within(form).getByLabelText('Two-factor setup key (optional)');
+    await user.type(field, 'not a key!');
+    await user.click(within(form).getByRole('button', { name: 'Save' }));
+    expect(within(form).getByRole('alert')).toHaveTextContent('Two-factor setup key');
+
+    await user.clear(field);
+    await user.type(field, SETUP_KEY);
+    const expected = (await totpCode(parseTotp(SETUP_KEY))).code;
+    expect(await within(form).findByText(/Current code:/)).toHaveTextContent(
+      `${expected.slice(0, 3)} ${expected.slice(3)}`,
+    );
+    await user.click(within(form).getByRole('button', { name: 'Save' }));
+    // The secret was encrypted with the item, never sent in the clear.
+    expect(server.requests.at(-1)!.body).not.toContain(SETUP_KEY);
+
+    const updated = await screen.findByRole('listitem', { name: ITEM.site });
+    const code = within(updated).getByLabelText('Two-factor code');
+    expect(code.textContent!.replace(' ', '')).toBe((await totpCode(parseTotp(SETUP_KEY))).code);
+    expect(within(updated).getByRole('timer')).toHaveAccessibleName(/seconds left/);
+    await user.click(within(updated).getByRole('button', { name: 'Copy code' }));
+    expect(await navigator.clipboard.readText()).toMatch(/^\d{6}$/);
   });
 });

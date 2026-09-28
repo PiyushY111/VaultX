@@ -27,6 +27,14 @@ export interface NewItem {
 export interface PopupItem extends ItemSummary {
   password: string;
   notes: string;
+  /** Has a two-factor secret; the popup asks for its current code with getTotpCode. */
+  hasTotp: boolean;
+}
+
+/** A two-factor code, never the secret it comes from. */
+export interface TotpCodeResponse {
+  code: string;
+  secondsLeft: number;
 }
 
 export interface VaultState {
@@ -54,6 +62,7 @@ export type PopupRequest =
   /** The second step of unlocking, when the account has two-factor login on. */
   | { type: 'unlockSecondFactor'; code: string; recovery: boolean }
   | { type: 'getWarnings' }
+  | { type: 'getTotpCode'; itemId: string }
   /** Sent after the popup copies a password, so the background can clear it later. */
   | { type: 'scheduleClipboardClear' };
 
@@ -63,7 +72,11 @@ export type ContentRequest =
   | { type: 'fill'; itemId: string }
   | { type: 'captureCredential'; username: string; password: string }
   | { type: 'getPendingSave' }
-  | { type: 'resolvePendingSave'; save: boolean };
+  | { type: 'resolvePendingSave'; save: boolean }
+  /** Logins for this page that have a two-factor secret (usernames only). */
+  | { type: 'getTotpMatches' }
+  /** The current code for one of them; only after a click on our prompt. */
+  | { type: 'fillTotp'; itemId: string };
 
 /** Sent by the background to a tab's content script. */
 export interface FillCredentialMessage {
@@ -117,6 +130,7 @@ export const POPUP_REQUEST_TYPES = new Set<PopupRequest['type']>([
   'addItem',
   'unlockSecondFactor',
   'getWarnings',
+  'getTotpCode',
   'scheduleClipboardClear',
 ]);
 
@@ -126,4 +140,6 @@ export const CONTENT_REQUEST_TYPES = new Set<ContentRequest['type']>([
   'captureCredential',
   'getPendingSave',
   'resolvePendingSave',
+  'getTotpMatches',
+  'fillTotp',
 ]);

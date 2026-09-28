@@ -60,6 +60,21 @@ describe('parseImport', () => {
     ]);
   });
 
+  it('puts valid two-factor secrets in their own field', () => {
+    const csv = `folder,favorite,type,name,notes,fields,reprompt,login_uri,login_username,login_password,login_totp
+,,login,GitHub,,,0,https://github.com,octocat,gh-pass,otpauth://totp/GitHub:octocat?secret=JBSWY3DPEHPK3PXP
+`;
+    expect(parseImport(csv).items).toEqual([
+      {
+        site: 'github.com',
+        username: 'octocat',
+        password: 'gh-pass',
+        notes: 'Name: GitHub',
+        totp: 'otpauth://totp/GitHub:octocat?secret=JBSWY3DPEHPK3PXP',
+      },
+    ]);
+  });
+
   it('reads a 1Password export, using the title when there is no URL', () => {
     const result = parseImport(ONEPASSWORD);
     expect(result.source).toBe('1Password');

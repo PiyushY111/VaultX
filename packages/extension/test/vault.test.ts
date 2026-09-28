@@ -467,3 +467,99 @@ describe('vault manifest', () => {
     expect(await makeVault().vaultWarnings()).toMatchObject({ missing: 0, unexpected: 0 });
   });
 });
+
+describe('two-factor codes', () => {
+  // RFC 6238's SHA-1 test secret: the code at T=59s is 287082.
+  const SECRET = 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ';
+
+  beforeEach(async () => {
+    clock = 59_000;
+    await server.seedItem(vaultKey, {
+      site: 'https://login.example.com',
+      username: 'mfa-user',
+      password: 'pw',
+      notes: '',
+      totp: SECRET,
+    });
+  });
+
+  it('lists only matching logins with a secret, and gives their code, never the secret', async () => {
+    const vault = makeVault();
+    await vault.unlock(EMAIL, PASSWORD);
+    const matches = await vault.totpMatchesForUrl('https://login.example.com/2fa');
+    expect(matches).toEqual([
+      { id: expect.any(String), site: 'https://login.example.com', username: 'mfa-user' },
+    ]);
+    expect(await vault.totpMatchesForUrl('https://github.com/sessions/two-factor')).toEqual([]);
+
+    const code = await vault.totpCodeForUrl(matches[0]!.id, 'https://login.example.com/2fa');
+    expect(code).toEqual({ code: '287082', secondsLeft: 1 });
+    expect(JSON.stringify(code)).not.toContain(SECRET);
+  });
+
+  it('refuses codes for other sites and insecure pages', async () => {
+    const vault = makeVault();
+    await vault.unlock(EMAIL, PASSWORD);
+    const [match] = await vault.totpMatchesForUrl('https://login.example.com/');
+    await expect(vault.totpCodeForUrl(match!.id, 'https://evil.example.org/')).rejects.toThrow(
+      'No matching login',
+    );
+    await expect(vault.totpCodeForUrl(match!.id, 'http://login.example.com/')).rejects.toThrow(
+      'https',
+    );
+    await expect(vault.totpCodeForUrl(githubId, 'https://github.com/')).rejects.toThrow(
+      'no two-factor code',
+    );
+  });
+
+  it('tells the popup which logins have codes, and gives it the code', async () => {
+    const vault = makeVault();
+    await vault.unlock(EMAIL, PASSWORD);
+    const items = await vault.listForPopup();
+    const withCode = items.find((item) => item.hasTotp)!;
+    expect(withCode.username).toBe('mfa-user');
+    expect(JSON.stringify(items)).not.toContain(SECRET);
+    expect((await vault.totpCodeForPopup(withCode.id)).code).toBe('287082');
+  });
+});
+
+describe('other kinds of item', () => {
+  it('leaves notes, cards and identities to the web vault', async () => {
+    await server.seedItem(vaultKey, {
+      type: 'note',
+      site: 'github.com', // A note titled like a site must never be offered as a login.
+      username: '',
+      password: '',
+      notes: 'secret note',
+    });
+    const vault = makeVault();
+    await vault.unlock(EMAIL, PASSWORD);
+    expect((await vault.listForPopup()).map((item) => item.site)).toEqual([
+      'github.com',
+      'https://bank.example.com/login',
+    ]);
+    expect(await vault.matchesForUrl('https://github.com/login')).toHaveLength(1);
+  });
+
+  it('keeps the old password in the history when the save prompt updates one', async () => {
+    const vault = makeVault();
+    await vault.unlock(EMAIL, PASSWORD);
+    await vault.captureCredential(9, 'https://github.com/session', 'octocat', 'ROTATED-1');
+    await vault.resolvePendingSave(9, true);
+    await vault.captureCredential(9, 'https://github.com/session', 'octocat', 'ROTATED-2');
+    await vault.resolvePendingSave(9, true);
+    const items = await makeVault().listForPopup();
+    // The popup never receives history; check what was stored instead.
+    expect(items.find((item) => item.site === 'github.com')!.password).toBe('ROTATED-2');
+    const stored = server.items.find((item) => item.id === githubId)!;
+    const { decryptVaultItems } = await import('../src/background/items');
+    const { items: decrypted } = await decryptVaultItems(
+      [{ ...stored, created_at: '', updated_at: '' }],
+      vaultKey,
+    );
+    expect(decrypted[0]!.history!.map((entry) => entry.password)).toEqual([
+      GITHUB.password,
+      'ROTATED-1',
+    ]);
+  });
+});

@@ -30,3 +30,4 @@ export {
   type VaultManifest,
 } from './manifest.js';
 export { decryptBackup, encryptBackup } from './backup.js';
+export { parseTotp, totpCode, type TotpConfig } from './totp.js';
