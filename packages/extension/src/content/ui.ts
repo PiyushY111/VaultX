@@ -26,39 +26,35 @@ const SIDE_GAP_PX = 12;
 /** Gap between the anchor field and the prompt below it. */
 const BELOW_GAP_PX = 8;
 
-// Uses system serif/sans faces: loading the extension's bundled
-// fonts here would mean exposing them to every page (web_accessible_resources),
-// which also lets pages fingerprint the extension.
+// Uses system sans faces only: loading the extension's bundled fonts here
+// would mean exposing them to every page (web_accessible_resources), which
+// also lets pages fingerprint the extension. Without the bundled Mincho, a
+// serif title would fall back to whatever serif the OS has, so it's sans too.
 const STYLES = `
   :host { all: initial; }
   .prompt {
     position: fixed; top: 14px; right: 14px; z-index: 2147483647;
     width: ${PROMPT_WIDTH_PX}px; max-width: calc(100vw - 28px);
-    padding: 14px 16px 14px;
+    padding: 12px 14px;
     background: #1c2533; color: #e9e2d0;
     border: 1px solid rgb(52 80 111 / 70%);
     border-radius: 4px;
-    box-shadow: 0 12px 32px rgb(0 0 0 / 45%);
+    box-shadow: 0 6px 18px rgb(0 0 0 / 35%);
     font: 14px/1.5 'Hiragino Sans', 'Yu Gothic UI', 'Yu Gothic', system-ui, sans-serif;
     color-scheme: dark;
     animation: rise 180ms ease-out both;
   }
-  /* Gold seam along the top edge. */
-  .prompt::before {
-    content: ''; position: absolute; left: 0; right: 0; top: -1px; height: 2px;
-    background: linear-gradient(90deg, transparent, #c9a45c 20%, #e0be78 50%, rgb(201 164 92 / 35%) 72%, transparent);
+  .head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .seal { display: flex; flex: none; color: #c9a45c; }
+  .seal-icon { width: 9px; height: 11px; }
+  .title { font-weight: 600; font-size: 14px; line-height: 1.35; }
+  .detail {
+    margin: 0 0 12px; padding: 6px 8px;
+    background: #141a24; border-radius: 3px;
+    color: #e9e2d0; font-size: 13px; overflow-wrap: anywhere;
   }
-  .head { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
-  .seal {
-    display: grid; place-items: center; flex: none;
-    width: 26px; height: 26px; border-radius: 3px;
-    background: #c8553d; color: #1c2533;
-  }
-  .seal-icon { width: 10px; height: 12px; }
-  .title { font: 700 15px/1.35 'Hiragino Mincho ProN', 'Yu Mincho', Georgia, serif; }
-  .detail { color: #9d998f; font-size: 13px; margin: 0 0 12px 36px; word-break: break-all; }
   select {
-    display: block; width: calc(100% - 36px); margin: 0 0 12px 36px;
+    display: block; width: 100%; margin: 0 0 12px;
     font: inherit; color: #e9e2d0; background: #141a24;
     border: 1px solid rgb(52 80 111 / 70%); border-radius: 3px; padding: 6px 8px;
   }
@@ -72,7 +68,7 @@ const STYLES = `
   button.primary { background: #c9a45c; border-color: #c9a45c; color: #141a24; }
   button.primary:hover { background: #e0be78; border-color: #e0be78; }
   button:focus-visible, select:focus-visible { outline: 2px solid #c9a45c; outline-offset: 2px; }
-  @keyframes rise { from { opacity: 0; transform: translateY(-6px); } }
+  @keyframes rise { from { opacity: 0; transform: translateY(-4px); } }
   @media (prefers-reduced-motion: reduce) { .prompt { animation: none; } }
 `;
 
