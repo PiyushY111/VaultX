@@ -29,6 +29,7 @@ await Promise.all([
   copyFile('src/popup/popup.css', `${outdir}/popup.css`),
   copyFile('src/offscreen/offscreen.html', `${outdir}/offscreen.html`),
   cp('src/popup/fonts', `${outdir}/fonts`, { recursive: true }),
+  cp('icons', `${outdir}/icons`, { recursive: true }),
 ]);
 
 // The content script runs inside every web page, and the offscreen document
