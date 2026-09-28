@@ -20,6 +20,12 @@ export interface PromptContent {
   actions: PromptAction[];
 }
 
+const PROMPT_WIDTH_PX = 320;
+/** Gap between the anchor field and the prompt beside it. */
+const SIDE_GAP_PX = 12;
+/** Gap between the anchor field and the prompt below it. */
+const BELOW_GAP_PX = 8;
+
 // Uses system serif/sans faces: loading the extension's bundled
 // fonts here would mean exposing them to every page (web_accessible_resources),
 // which also lets pages fingerprint the extension.
@@ -27,7 +33,7 @@ const STYLES = `
   :host { all: initial; }
   .prompt {
     position: fixed; top: 14px; right: 14px; z-index: 2147483647;
-    width: 320px; max-width: calc(100vw - 28px);
+    width: ${PROMPT_WIDTH_PX}px; max-width: calc(100vw - 28px);
     padding: 14px 16px 14px;
     background: #1c2533; color: #e9e2d0;
     border: 1px solid rgb(52 80 111 / 70%);
@@ -74,13 +80,20 @@ export class Prompt {
   private host: HTMLElement | null = null;
   private root: ShadowRoot | null = null;
   private selected: string | null = null;
+  private box: HTMLElement | null = null;
+  private anchor: HTMLElement | null = null;
+  private readonly reposition = () => this.position();
 
   /** Value of the selected choice, if the prompt offered choices. */
   get selection(): string | null {
     return this.selected;
   }
 
-  show(content: PromptContent): void {
+  /**
+   * Shows the prompt next to `anchor` (the field it's about), or in the
+   * top-right corner without one.
+   */
+  show(content: PromptContent, anchor?: HTMLElement | null): void {
     this.hide();
     this.host = document.createElement('vaultx-prompt');
     this.root = this.host.attachShadow({ mode: 'closed' });
@@ -126,12 +139,36 @@ export class Prompt {
     box.append(actions);
     this.root.append(box);
     document.documentElement.append(this.host);
+
+    this.box = box;
+    if (anchor) {
+      this.anchor = anchor;
+      this.position();
+      // Capture phase, so scrolling any container (scroll doesn't bubble) moves it too.
+      window.addEventListener('scroll', this.reposition, { capture: true, passive: true });
+      window.addEventListener('resize', this.reposition, { passive: true });
+    }
   }
 
   hide(): void {
+    window.removeEventListener('scroll', this.reposition, { capture: true });
+    window.removeEventListener('resize', this.reposition);
     this.host?.remove();
     this.host = null;
     this.root = null;
+    this.box = null;
+    this.anchor = null;
+  }
+
+  /** Beside the anchor if it fits in the viewport, otherwise underneath it. */
+  private position(): void {
+    if (!this.box || !this.anchor) return;
+    const rect = this.anchor.getBoundingClientRect();
+    const fitsBeside = rect.right + SIDE_GAP_PX + PROMPT_WIDTH_PX <= window.innerWidth;
+    const { style } = this.box;
+    style.right = 'auto';
+    style.left = `${fitsBeside ? rect.right + SIDE_GAP_PX : rect.left}px`;
+    style.top = `${fitsBeside ? rect.top : rect.bottom + BELOW_GAP_PX}px`;
   }
 
   private applyStyles(root: ShadowRoot): void {

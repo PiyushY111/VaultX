@@ -118,23 +118,30 @@ function main(): void {
     }
     const matches = response.data;
     if (matches.length === 0) return;
-    prompt.show({
-      message:
-        matches.length === 1 ? 'Fill saved login?' : `${matches.length} saved logins for this site`,
-      detail: matches.length === 1 ? matches[0]!.username || '(no username)' : location.hostname,
-      choices: matches.map((match) => ({
-        value: match.id,
-        label: match.username || '(no username)',
-      })),
-      actions: [
-        { label: 'Not now', onClick: dismiss },
-        {
-          label: 'Fill',
-          primary: true,
-          onClick: () => void fill(prompt.selection ?? matches[0]!.id),
-        },
-      ],
-    });
+    const fields = findLoginFields(document)[0];
+    const targetField = fields ? (fields.username ?? fields.password) : null;
+    prompt.show(
+      {
+        message:
+          matches.length === 1
+            ? 'Fill saved login?'
+            : `${matches.length} saved logins for this site`,
+        detail: matches.length === 1 ? matches[0]!.username || '(no username)' : location.hostname,
+        choices: matches.map((match) => ({
+          value: match.id,
+          label: match.username || '(no username)',
+        })),
+        actions: [
+          { label: 'Not now', onClick: dismiss },
+          {
+            label: 'Fill',
+            primary: true,
+            onClick: () => void fill(prompt.selection ?? matches[0]!.id),
+          },
+        ],
+      },
+      targetField,
+    );
   }
 
   async function fill(itemId: string): Promise<void> {
@@ -158,22 +165,26 @@ function main(): void {
     const response = await send<ItemSummary[]>({ type: 'getTotpMatches' });
     if (!response.ok || response.data.length === 0) return;
     const matches = response.data;
-    prompt.show({
-      message: 'Fill two-factor code?',
-      detail: matches.length === 1 ? matches[0]!.username || location.hostname : location.hostname,
-      choices: matches.map((match) => ({
-        value: match.id,
-        label: match.username || '(no username)',
-      })),
-      actions: [
-        { label: 'Not now', onClick: dismiss },
-        {
-          label: 'Fill code',
-          primary: true,
-          onClick: () => void fillTotp(prompt.selection ?? matches[0]!.id),
-        },
-      ],
-    });
+    prompt.show(
+      {
+        message: 'Fill two-factor code?',
+        detail:
+          matches.length === 1 ? matches[0]!.username || location.hostname : location.hostname,
+        choices: matches.map((match) => ({
+          value: match.id,
+          label: match.username || '(no username)',
+        })),
+        actions: [
+          { label: 'Not now', onClick: dismiss },
+          {
+            label: 'Fill code',
+            primary: true,
+            onClick: () => void fillTotp(prompt.selection ?? matches[0]!.id),
+          },
+        ],
+      },
+      findOtpField(document),
+    );
   }
 
   async function fillTotp(itemId: string): Promise<void> {
