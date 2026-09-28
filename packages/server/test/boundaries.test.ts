@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import {
   DEFAULT_KDF_PARAMS,
   KEY_BYTES,
+  MAX_KDF_ITERATIONS,
   MAX_KDF_MEMORY_COST,
   MIN_KDF_PARAMS,
   NONCE_BYTES,
@@ -81,6 +82,7 @@ describe('server limits stay in sync with @password-manager/crypto', () => {
     expect(limits.KDF_LIMITS.memoryCost.min).toBe(MIN_KDF_PARAMS.memoryCost);
     expect(limits.KDF_LIMITS.memoryCost.max).toBe(MAX_KDF_MEMORY_COST);
     expect(limits.KDF_LIMITS.iterations.min).toBe(MIN_KDF_PARAMS.iterations);
+    expect(limits.KDF_LIMITS.iterations.max).toBe(MAX_KDF_ITERATIONS);
     expect(limits.KDF_LIMITS.parallelism.min).toBe(MIN_KDF_PARAMS.parallelism);
     expect(limits.KDF_LIMITS.parallelism.max).toBe(MIN_KDF_PARAMS.parallelism);
     expect(limits.DEFAULT_KDF_PARAMS).toEqual(DEFAULT_KDF_PARAMS);

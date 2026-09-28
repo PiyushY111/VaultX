@@ -51,7 +51,8 @@ all traffic that reaches the server.
   that they may have been tampered with.
 - KDF downgrade protection: clients refuse `kdf_params` below the floor
   (19 MiB / 2 passes), so the server can't make offline guessing cheaper by
-  serving weak parameters at login.
+  serving weak parameters at login. They also refuse parameters above a
+  ceiling (1 GiB / 100 passes), so it can't hang login with huge ones.
 - The extension's code is installed locally and doesn't come from the
   vault server, so a malicious operator can't change it.
 

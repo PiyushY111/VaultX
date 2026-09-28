@@ -1,5 +1,6 @@
-import type { FastifyInstance, onRequestHookHandler } from 'fastify';
+import type { FastifyInstance, FastifyRequest, onRequestHookHandler } from 'fastify';
 import type pg from 'pg';
+import type { Config } from '../config.js';
 import { isUniqueViolation, withTransaction } from '../db.js';
 import { decodeBytes, encodeBytes } from '../encoding.js';
 import { conflict, notFound } from '../http-errors.js';
@@ -84,17 +85,39 @@ const staleRevision = (current: number) =>
   });
 
 /**
+ * Per-account rate limit for a vault route. @fastify/rate-limit appends its
+ * hook after the route's own onRequest hooks, so it runs after
+ * `authenticate` and can key on the account: a fresh session doesn't reset
+ * the budget, and unauthenticated requests are rejected before they count.
+ */
+const perAccountLimit = (max: number) => ({
+  rateLimit: {
+    max,
+    timeWindow: '1 minute',
+    keyGenerator: (request: FastifyRequest) => request.userId,
+  },
+});
+
+/**
  * Vault routes. The server treats every payload as opaque ciphertext: it
  * checks lengths and ownership, and stores and returns bytes unchanged.
  */
 export function registerVaultRoutes(
   app: FastifyInstance,
   pool: pg.Pool,
+  config: Config,
   authenticate: onRequestHookHandler,
 ): void {
+  const vaultLimit = perAccountLimit(config.vaultRateLimitMax);
+  const batchLimit = perAccountLimit(config.vaultBatchRateLimitMax);
+
   app.get(
     '/vault-key',
-    { onRequest: authenticate, schema: { response: { 200: vaultKeyResponseSchema } } },
+    {
+      onRequest: authenticate,
+      config: vaultLimit,
+      schema: { response: { 200: vaultKeyResponseSchema } },
+    },
     async (request) => {
       const { rows } = await pool.query<{
         encrypted_vault_key: Buffer;
@@ -118,7 +141,11 @@ export function registerVaultRoutes(
 
   app.get(
     '/vault-items',
-    { onRequest: authenticate, schema: { response: { 200: vaultResponseSchema } } },
+    {
+      onRequest: authenticate,
+      config: vaultLimit,
+      schema: { response: { 200: vaultResponseSchema } },
+    },
     async (request) => {
       // One snapshot, so the manifest and items always match.
       return withTransaction(pool, async (db) => {
@@ -143,7 +170,7 @@ export function registerVaultRoutes(
   // manifest, written by whichever client loads it first.
   app.put<{ Body: ManifestBody }>(
     '/vault-manifest',
-    { onRequest: authenticate, schema: { body: manifestBodySchema } },
+    { onRequest: authenticate, config: vaultLimit, schema: { body: manifestBodySchema } },
     async (request, reply) => {
       await withTransaction(pool, (db) => advanceManifest(db, request.userId, request.body));
       return reply.code(204).send();
@@ -155,6 +182,7 @@ export function registerVaultRoutes(
     '/vault-items',
     {
       onRequest: authenticate,
+      config: vaultLimit,
       schema: { body: createItemBodySchema, response: { 201: itemResponseSchema } },
     },
     async (request, reply) => {
@@ -185,6 +213,7 @@ export function registerVaultRoutes(
     '/vault-items/batch',
     {
       onRequest: authenticate,
+      config: batchLimit,
       bodyLimit: CHANGE_PASSWORD_BODY_LIMIT_BYTES,
       schema: { body: createItemsBodySchema, response: { 201: itemListResponseSchema } },
     },
@@ -225,6 +254,7 @@ export function registerVaultRoutes(
     '/vault-items/:id',
     {
       onRequest: authenticate,
+      config: vaultLimit,
       schema: {
         params: itemIdParamsSchema,
         body: updateItemBodySchema,
@@ -276,7 +306,11 @@ export function registerVaultRoutes(
 
   app.delete<{ Params: { id: string }; Body: { manifest: ManifestBody } }>(
     '/vault-items/:id',
-    { onRequest: authenticate, schema: { params: itemIdParamsSchema, body: deleteItemBodySchema } },
+    {
+      onRequest: authenticate,
+      config: vaultLimit,
+      schema: { params: itemIdParamsSchema, body: deleteItemBodySchema },
+    },
     async (request, reply) => {
       await withTransaction(pool, async (db) => {
         const { rowCount } = await db.query(

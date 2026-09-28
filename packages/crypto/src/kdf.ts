@@ -41,6 +41,12 @@ export const MIN_KDF_PARAMS: Readonly<KdfParams> = Object.freeze({
 /** Upper bound on memory cost (1 GiB) to keep WASM builds from failing unpredictably. */
 export const MAX_KDF_MEMORY_COST = 1024 * 1024;
 
+/**
+ * Upper bound on iterations. kdf_params come from the server, so without a
+ * ceiling a malicious server could make login run forever.
+ */
+export const MAX_KDF_ITERATIONS = 100;
+
 export function validateKdfParams(params: KdfParams): void {
   const { memoryCost, iterations, parallelism } = params;
   for (const [name, value] of Object.entries({ memoryCost, iterations, parallelism })) {
@@ -53,9 +59,9 @@ export function validateKdfParams(params: KdfParams): void {
       `kdfParams.memoryCost must be between ${MIN_KDF_PARAMS.memoryCost} and ${MAX_KDF_MEMORY_COST} KiB`,
     );
   }
-  if (iterations < MIN_KDF_PARAMS.iterations) {
+  if (iterations < MIN_KDF_PARAMS.iterations || iterations > MAX_KDF_ITERATIONS) {
     throw new CryptoInputError(
-      `kdfParams.iterations must be at least ${MIN_KDF_PARAMS.iterations}`,
+      `kdfParams.iterations must be between ${MIN_KDF_PARAMS.iterations} and ${MAX_KDF_ITERATIONS}`,
     );
   }
   if (parallelism !== 1) {

@@ -53,7 +53,7 @@ export async function buildApp({ pool, config, logger }: AppOptions): Promise<Fa
 
   registerAuthRoutes(app, pool, config);
   const authenticate = createAuthenticate(pool);
-  registerVaultRoutes(app, pool, authenticate);
+  registerVaultRoutes(app, pool, config, authenticate);
   registerAccountRoutes(app, pool, config, authenticate);
   registerPasskeyRoutes(app, pool, config, authenticate);
 

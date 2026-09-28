@@ -12,6 +12,10 @@ export interface Config {
   sessionTtlSeconds: number;
   /** Max requests per IP per minute to /signup, /prelogin and /login. */
   authRateLimitMax: number;
+  /** Max requests per account per minute to each vault route. */
+  vaultRateLimitMax: number;
+  /** Max /vault-items/batch requests (up to 64 MiB each) per account per minute. */
+  vaultBatchRateLimitMax: number;
   /** Per-account limit on failed logins. */
   loginThrottle: LoginThrottleConfig;
   /** Keys the fake KDF salts that /prelogin returns for unknown emails. */
@@ -47,6 +51,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     trustProxy: env.TRUST_PROXY === 'true',
     sessionTtlSeconds: readInt(env, 'SESSION_TTL_SECONDS', 24 * 60 * 60),
     authRateLimitMax: readInt(env, 'AUTH_RATE_LIMIT_MAX', 10),
+    vaultRateLimitMax: readInt(env, 'VAULT_RATE_LIMIT_MAX', 120),
+    vaultBatchRateLimitMax: readInt(env, 'VAULT_BATCH_RATE_LIMIT_MAX', 20),
     loginThrottle: {
       maxFailures: readInt(env, 'LOGIN_MAX_FAILURES', 5),
       windowSeconds: readInt(env, 'LOGIN_FAILURE_WINDOW_SECONDS', 15 * 60),

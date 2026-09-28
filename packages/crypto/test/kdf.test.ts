@@ -2,9 +2,11 @@ import { describe, expect, it } from 'vitest';
 import {
   CryptoInputError,
   DEFAULT_KDF_PARAMS,
+  MAX_KDF_ITERATIONS,
   MIN_KDF_PARAMS,
   deriveMasterKey,
   generateSalt,
+  validateKdfParams,
   type KdfParams,
 } from '../src/index.js';
 import { fromHex, toHex } from './helpers.js';
@@ -71,12 +73,22 @@ describe('deriveMasterKey', () => {
       ],
       ['memoryCost above maximum', { ...MIN_KDF_PARAMS, memoryCost: 2 * 1024 * 1024 }],
       ['iterations below minimum', { ...MIN_KDF_PARAMS, iterations: 1 }],
+      // A malicious server could otherwise make login run forever.
+      ['iterations above maximum', { ...MIN_KDF_PARAMS, iterations: 101 }],
+      ['huge iterations', { ...MIN_KDF_PARAMS, iterations: 2 ** 31 - 1 }],
       ['parallelism other than 1', { ...MIN_KDF_PARAMS, parallelism: 4 }],
       ['non-integer memoryCost', { ...MIN_KDF_PARAMS, memoryCost: 20000.5 }],
       ['NaN iterations', { ...MIN_KDF_PARAMS, iterations: Number.NaN }],
     ];
     it.each(badParams)('rejects %s', async (_, params) => {
       await expect(deriveMasterKey(PASSWORD, SALT, params)).rejects.toThrow(CryptoInputError);
+    });
+
+    it('accepts iterations at the maximum', () => {
+      expect(MAX_KDF_ITERATIONS).toBe(100);
+      expect(() =>
+        validateKdfParams({ ...MIN_KDF_PARAMS, iterations: MAX_KDF_ITERATIONS }),
+      ).not.toThrow();
     });
   });
 });

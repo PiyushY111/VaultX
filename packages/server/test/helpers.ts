@@ -72,6 +72,8 @@ export async function createTestContext(
     trustProxy: false,
     sessionTtlSeconds: 3600,
     authRateLimitMax: 10_000,
+    vaultRateLimitMax: 10_000,
+    vaultBatchRateLimitMax: 10_000,
     loginThrottle: { maxFailures: 5, windowSeconds: 900 },
     preloginSecret: Buffer.from('test-prelogin-secret'),
     preloginSecretIsEphemeral: false,

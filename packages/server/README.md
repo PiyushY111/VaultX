@@ -187,6 +187,7 @@ Integration tests start a throwaway Postgres container via Testcontainers
 
 `PGHOST`/`PGPORT`/`PGUSER`/`PGPASSWORD`/`PGDATABASE` (or `DATABASE_URL`),
 `PORT`, `HOST`, `LOG_LEVEL`, `SESSION_TTL_SECONDS`, `AUTH_RATE_LIMIT_MAX`,
+`VAULT_RATE_LIMIT_MAX`, `VAULT_BATCH_RATE_LIMIT_MAX`,
 `LOGIN_MAX_FAILURES`, `LOGIN_FAILURE_WINDOW_SECONDS`, `TRUST_PROXY`, `PRELOGIN_SECRET`,
 `TOTP_ENCRYPTION_KEY` (required; see above), `WEBAUTHN_RP_ID` and `WEBAUTHN_ORIGINS`
 (required), `WEBAUTHN_RP_NAME`. See `.env.example` at the repo root.

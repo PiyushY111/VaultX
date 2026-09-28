@@ -1,5 +1,6 @@
 export {
   DEFAULT_KDF_PARAMS,
+  MAX_KDF_ITERATIONS,
   MAX_KDF_MEMORY_COST,
   MIN_KDF_PARAMS,
   deriveMasterKey,

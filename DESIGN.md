@@ -59,7 +59,8 @@ manifest ciphertext + 24-byte nonce                ─▶ users.encrypted_manife
 `kdf_params` is stored per user as JSON (`{memoryCost, iterations, parallelism}`,
 memoryCost in KiB), so costs can be raised for new accounts without breaking
 existing ones. Clients refuse server-supplied parameters below the floor, so a
-malicious server can't downgrade the KDF. libsodium's Argon2id is single-lane,
+malicious server can't downgrade the KDF, and above a ceiling (1 GiB, 100
+passes), so it can't make login run forever either. libsodium's Argon2id is single-lane,
 so `parallelism` must currently be 1. The field exists for forward
 compatibility.
 
@@ -421,6 +422,16 @@ any key.
     check the auth hash, not even a correct one.
   - The limit applies to any submitted email, registered or not, so responses
     don't reveal account existence.
+
+### Vault rate limits (server)
+
+- **Per account, per route:** 120 requests/minute to each vault route
+  (`VAULT_RATE_LIMIT_MAX`), and 20/minute to `/vault-items/batch`, which
+  takes up to 64 MiB per request (`VAULT_BATCH_RATE_LIMIT_MAX`; 20 × 500
+  items is still 10,000 items a minute for imports).
+- Keyed on the account, not the IP or token, so a stolen token or a fresh
+  session can't reset it. The limiter runs after authentication, so
+  unauthenticated requests get a 401 without touching any account's budget.
 
 ### Item writes
 

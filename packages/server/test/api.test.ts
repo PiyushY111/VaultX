@@ -267,6 +267,92 @@ describe('authentication on protected routes', () => {
   });
 });
 
+describe('vault rate limits', () => {
+  const vaultRoutes = [
+    { method: 'GET', url: '/vault-key' },
+    { method: 'GET', url: '/vault-items' },
+    { method: 'POST', url: '/vault-items' },
+    { method: 'PUT', url: `/vault-items/${randomUUID()}` },
+    { method: 'DELETE', url: `/vault-items/${randomUUID()}` },
+    { method: 'PUT', url: '/vault-manifest' },
+  ] as const;
+
+  const send = (
+    context: TestContext,
+    route: { method: 'GET' | 'POST' | 'PUT' | 'DELETE'; url: string },
+    token: string,
+  ) =>
+    context.app.inject({
+      method: route.method,
+      url: route.url,
+      headers: bearer(token),
+      ...(route.method !== 'GET' && { payload: {} }),
+    });
+
+  it('limits every vault route per account', async () => {
+    const limited = await createTestContext({ vaultRateLimitMax: 2 });
+    try {
+      const { token } = await registerAndLogin(limited.app, 'limit@example.com', 'pw-limit');
+      for (const route of vaultRoutes) {
+        const statuses = [];
+        for (let i = 0; i < 3; i++) statuses.push((await send(limited, route, token)).statusCode);
+        expect(statuses.slice(0, 2), `${route.method} ${route.url}`).not.toContain(429);
+        expect(statuses[2], `${route.method} ${route.url}`).toBe(429);
+      }
+    } finally {
+      await limited.close();
+    }
+  });
+
+  it('shares the budget across sessions of one account, not across accounts', async () => {
+    const limited = await createTestContext({ vaultRateLimitMax: 2 });
+    try {
+      const { user, token } = await registerAndLogin(limited.app, 'a@example.com', 'pw-a');
+      const secondToken = await login(limited.app, user);
+      const { token: otherToken } = await registerAndLogin(limited.app, 'b@example.com', 'pw-b');
+      const list = { method: 'GET', url: '/vault-items' } as const;
+
+      expect((await send(limited, list, token)).statusCode).toBe(200);
+      expect((await send(limited, list, secondToken)).statusCode).toBe(200);
+      // A fresh token for the same account doesn't reset the budget.
+      expect((await send(limited, list, secondToken)).statusCode).toBe(429);
+      expect((await send(limited, list, otherToken)).statusCode).toBe(200);
+    } finally {
+      await limited.close();
+    }
+  });
+
+  it("doesn't count unauthenticated requests against an account", async () => {
+    const limited = await createTestContext({ vaultRateLimitMax: 1 });
+    try {
+      const { token } = await registerAndLogin(limited.app, 'anon@example.com', 'pw-anon');
+      const list = { method: 'GET', url: '/vault-items' } as const;
+      for (let i = 0; i < 3; i++) {
+        expect((await send(limited, list, 'A'.repeat(43))).statusCode).toBe(401);
+      }
+      expect((await send(limited, list, token)).statusCode).toBe(200);
+    } finally {
+      await limited.close();
+    }
+  });
+
+  it('gives the 64 MiB batch import its own, tighter limit', async () => {
+    const limited = await createTestContext({ vaultRateLimitMax: 100, vaultBatchRateLimitMax: 2 });
+    try {
+      const { token } = await registerAndLogin(limited.app, 'batch@example.com', 'pw-batch');
+      const batch = { method: 'POST', url: '/vault-items/batch' } as const;
+      const statuses = [];
+      for (let i = 0; i < 3; i++) statuses.push((await send(limited, batch, token)).statusCode);
+      expect(statuses).toEqual([400, 400, 429]);
+      // Other vault routes still have their own budget.
+      const list = { method: 'GET', url: '/vault-items' } as const;
+      expect((await send(limited, list, token)).statusCode).toBe(200);
+    } finally {
+      await limited.close();
+    }
+  });
+});
+
 describe('GET /vault-key', () => {
   it('returns what the client needs to re-derive keys and unwrap the vault key', async () => {
     const { user, token } = await registerAndLogin(
