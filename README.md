@@ -2,13 +2,6 @@
 
 ## Project overview
 
-> **Status:** 0.1.0, pre-1.0, and **not independently audited**. See
-> [SECURITY.md](SECURITY.md) for how to report a vulnerability and what's
-> in scope, [THREAT_MODEL.md](THREAT_MODEL.md) for what VaultX does and
-> doesn't protect against, and [docs/AUDIT_SCOPE.md](docs/AUDIT_SCOPE.md)
-> for a reviewer's map of the code. Changes are in
-> [CHANGELOG.md](CHANGELOG.md).
-
 VaultX is a self-hosted, zero-knowledge password manager. You run the server; it stores
 only ciphertext. Your master password, and every key that can decrypt your
 vault, stay on your devices:
