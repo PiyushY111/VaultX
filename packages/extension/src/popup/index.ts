@@ -5,7 +5,10 @@ import {
 } from '../../../web/src/lib/passwordGenerator';
 import { emblem, keyhole } from '../shared/emblem';
 import type {
+  CheckpointInfo,
+  CheckpointVerification,
   ItemSummary,
+  PendingBaselineInfo,
   PopupItem,
   PopupRequest,
   Response,
@@ -317,6 +320,17 @@ async function renderVault(state: VaultState): Promise<void> {
   const list = h('ul', { class: 'ledger', 'aria-label': 'All logins' });
   const matchesSection = h('section', { class: 'this-site', 'aria-label': 'Logins for this site' });
   matchesSection.hidden = true;
+  const baselineBox = h('section', { class: 'warnings', 'aria-label': 'Confirm this vault' });
+  baselineBox.hidden = true;
+  const addButton = h(
+    'button',
+    {
+      type: 'button',
+      class: 'btn btn-primary',
+      onclick: async () => renderAddItem(state, await activeTabHost()),
+    },
+    'Add login',
+  );
 
   mount(
     h(
@@ -345,6 +359,7 @@ async function renderVault(state: VaultState): Promise<void> {
       { class: 'panel' },
       h('p', { class: 'muted' }, `Unlocked as ${state.email ?? ''}`),
       warnings,
+      baselineBox,
       status,
       matchesSection,
       h(
@@ -352,24 +367,22 @@ async function renderVault(state: VaultState): Promise<void> {
         { class: 'row' },
         h('h2', { class: 'section-title' }, 'All logins'),
         h('span', { class: 'spacer' }),
-        h(
-          'button',
-          {
-            type: 'button',
-            class: 'btn btn-primary',
-            onclick: async () => renderAddItem(state, await activeTabHost()),
-          },
-          'Add login',
-        ),
+        addButton,
       ),
       search,
       list,
+      checkpointSection(),
     ),
   );
 
   let items: PopupItem[];
   try {
     items = await send<PopupItem[]>({ type: 'listItems' });
+    const baseline = await send<PendingBaselineInfo | null>({ type: 'getBaseline' });
+    if (baseline) {
+      addButton.disabled = true;
+      showBaseline(baselineBox, baseline);
+    }
     const messages = warningMessages(await send<VaultWarnings>({ type: 'getWarnings' }));
     if (messages.length) {
       warnings.hidden = false;
@@ -670,6 +683,146 @@ function settingsButton(state: VaultState): HTMLButtonElement {
     { type: 'button', class: 'btn btn-quiet', onclick: () => renderSettings(state) },
     'Settings',
   );
+}
+
+const BASELINE_REASONS: Record<PendingBaselineInfo['reason'], string> = {
+  none: 'This vault has no encrypted list of your items yet (it was created before VaultX kept one), so there’s nothing to check what the server sent against.',
+  missing:
+    'This browser has seen an encrypted list of your items before, but the server no longer has one. The server may have lost data, or be hiding changes.',
+  tampered:
+    'The server’s encrypted list of your items doesn’t open with your vault key, so it can’t be trusted.',
+};
+
+const formatDate = (iso: string) =>
+  new Date(iso).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+
+/**
+ * Asks before trusting a vault with no usable manifest (like the web vault).
+ * Only this popup can accept; content scripts can't send acceptBaseline.
+ */
+function showBaseline(box: HTMLElement, baseline: PendingBaselineInfo): void {
+  const { itemCount, oldestUpdate, newestUpdate, previouslySeenVersion, reason } = baseline;
+  const error = h('p', { class: 'error', role: 'alert' });
+  const declined = () =>
+    box.replaceChildren(
+      h('strong', {}, 'This vault isn’t confirmed yet, so it’s read-only.'),
+      h('p', {}, 'Nothing can be saved to it until you confirm it.'),
+      h(
+        'button',
+        { type: 'button', class: 'btn btn-quiet', onclick: () => showBaseline(box, baseline) },
+        'Review',
+      ),
+    );
+  box.hidden = false;
+  box.replaceChildren(
+    h('strong', {}, 'Use this as the trusted baseline?'),
+    h('p', {}, BASELINE_REASONS[reason]),
+    h(
+      'p',
+      {},
+      `The server sent ${itemCount} item${itemCount === 1 ? '' : 's'} that opened with your key` +
+        (oldestUpdate && newestUpdate
+          ? `, last changed between ${formatDate(oldestUpdate)} and ${formatDate(newestUpdate)} (the server’s dates).`
+          : '.') +
+        (previouslySeenVersion > 0
+          ? ` This browser had seen version ${previouslySeenVersion} of the list before.`
+          : ''),
+    ),
+    h(
+      'p',
+      { class: 'muted' },
+      'Confirm only if this looks like your whole vault. Otherwise choose “Not now” and check from another device (compare the vault checkpoint).',
+    ),
+    error,
+    h(
+      'div',
+      { class: 'row' },
+      h(
+        'button',
+        {
+          type: 'button',
+          class: 'btn btn-primary',
+          onclick: async () => {
+            try {
+              await send({ type: 'acceptBaseline' });
+              await render();
+            } catch (err) {
+              onRequestError(err, (message) => (error.textContent = message));
+            }
+          },
+        },
+        'Use as trusted baseline',
+      ),
+      h('button', { type: 'button', class: 'btn btn-quiet', onclick: declined }, 'Not now'),
+    ),
+  );
+}
+
+const CHECKPOINT_RESULTS: Record<
+  CheckpointVerification['result'],
+  (v: CheckpointVerification) => string
+> = {
+  match: (v) => `Match: this device sees the same vault (version ${v.currentVersion}).`,
+  'older-checkpoint': (v) =>
+    `That checkpoint is from an earlier version (${v.claimedVersion}); this device sees version ${v.currentVersion}. That’s expected if the vault has changed since.`,
+  rollback: (v) =>
+    `Warning: this device sees an older vault (version ${v.currentVersion}) than your checkpoint (version ${v.claimedVersion}). The server may be showing you an old copy.`,
+  mismatch: (v) =>
+    `Warning: same version (${v.currentVersion}), different fingerprint. This isn’t the vault your other device saw.`,
+};
+
+/** The vault checkpoint, and a box to check one copied from another device. */
+function checkpointSection(): HTMLElement {
+  const value = h('code', { class: 'checkpoint', 'aria-label': 'Vault checkpoint' }, '…');
+  const input = h('input', {
+    name: 'checkpoint',
+    autocomplete: 'off',
+    spellcheck: 'false',
+    placeholder: '42 · ABCD-EFGH-IJKL-MNOP',
+  });
+  const result = h('p', { class: 'muted', role: 'status' });
+  const details = h(
+    'details',
+    { class: 'checkpoint-section' },
+    h('summary', {}, 'Vault checkpoint'),
+    h('p', {}, value),
+    h(
+      'p',
+      { class: 'muted' },
+      'Compare with the checkpoint on another device or your emergency kit. It’s computed with your vault key and means nothing to anyone else.',
+    ),
+    h(
+      'form',
+      {
+        'aria-label': 'Verify checkpoint',
+        onsubmit: async (event: Event) => {
+          event.preventDefault();
+          try {
+            const verification = await send<CheckpointVerification>({
+              type: 'verifyCheckpoint',
+              checkpoint: input.value,
+            });
+            const bad = verification.result === 'rollback' || verification.result === 'mismatch';
+            result.className = bad ? 'error' : 'muted';
+            result.setAttribute('role', bad ? 'alert' : 'status');
+            result.textContent = CHECKPOINT_RESULTS[verification.result](verification);
+          } catch (err) {
+            result.className = 'error';
+            result.setAttribute('role', 'alert');
+            result.textContent = errorText(err);
+          }
+        },
+      },
+      h('label', {}, 'Checkpoint from another device', input),
+      h('button', { type: 'submit', class: 'btn' }, 'Verify checkpoint'),
+    ),
+    result,
+  );
+  void send<CheckpointInfo>({ type: 'getCheckpoint' }).then(
+    ({ checkpoint }) => (value.textContent = checkpoint ?? 'None yet: confirm your vault first.'),
+    (err: unknown) => (value.textContent = errorText(err)),
+  );
+  return details;
 }
 
 function renderSettings(state: VaultState): void {

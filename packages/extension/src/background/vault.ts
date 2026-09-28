@@ -1,6 +1,10 @@
 import {
+  CryptoInputError,
   DecryptionError,
   checkAgainstManifest,
+  compareCheckpoints,
+  parseCheckpoint,
+  vaultCheckpoint,
   parseTotp,
   totpCode,
   decryptManifest,
@@ -9,11 +13,14 @@ import {
   deriveMasterKey,
   encryptManifest,
   nextManifest,
+  type VaultCheckpoint,
   type VaultManifest,
 } from '@password-manager/crypto';
 import { fromBase64, toBase64 } from '../shared/base64';
 import type {
+  CheckpointVerification,
   ItemSummary,
+  PendingBaselineInfo,
   PendingSavePrompt,
   PopupItem,
   Settings,
@@ -100,6 +107,14 @@ interface PendingLogin {
 const isManifestConflict = (error: unknown) =>
   error instanceof ApiError && error.status === 409 && 'manifest_version' in error.details;
 
+/** A write was attempted before the user confirmed the vault's baseline in the popup. */
+export class BaselineRequiredError extends Error {
+  constructor() {
+    super('Open the VaultX extension and confirm your vault before saving to it.');
+    this.name = 'BaselineRequiredError';
+  }
+}
+
 export class LockedError extends Error {
   constructor(message = 'Vault is locked') {
     super(message);
@@ -157,6 +172,8 @@ export class Vault {
   /** The manifest the next write builds on; loaded with the items. */
   private manifest: VaultManifest | null = null;
   private warnings: VaultWarnings = NO_WARNINGS;
+  /** Set while the vault has no trusted manifest and waits for the user's decision in the popup. */
+  private baseline: PendingBaselineInfo | null = null;
   private pendingLogin: PendingLogin | null = null;
 
   constructor(private readonly deps: VaultDeps) {}
@@ -305,6 +322,7 @@ export class Vault {
     this.active = null;
     this.items = null;
     this.manifest = null;
+    this.baseline = null;
     this.warnings = NO_WARNINGS;
     this.clearPendingLogin();
     await this.deps.session.clear();
@@ -392,31 +410,91 @@ export class Vault {
       warnings.rolledBack += items.filter((item) => check.mismatched.includes(item.id)).length;
       items = items.filter((item) => !hidden.has(item.id));
       await ledger.recordManifest(manifest.version);
+      this.baseline = null;
     } else {
-      // No usable manifest: start one from what could be verified, at the
-      // version after the server's, so the next write repairs it.
+      // No usable manifest. What could be verified becomes the candidate
+      // baseline, at the version after the server's. Nothing is written until
+      // the user accepts it in the popup: this load may have been started by
+      // a content script (a page asking for autofill matches), and a web page
+      // must never be able to make the extension trust what the server sent.
       manifest = {
         version: payload?.version ?? 0,
         items: Object.fromEntries(items.map((item) => [item.id, item.revision])),
         updatedAt: '',
         updatedBy: '',
       };
-      if (!payload) {
-        // A vault that never had one gets its first right away.
-        const first = nextManifest(manifest, {}, CLIENT_NAME);
-        await this.call(async (s) =>
-          s.api.putManifest(s.token, await this.encryptManifestPayload(first, s.vaultKey)),
-        ).catch((error: unknown) => {
-          if (!isManifestConflict(error)) throw error;
-        });
-        manifest = first;
-        await ledger.recordManifest(first.version);
-      }
+      const kept = new Set(items.map((item) => item.id));
+      const dates = responses
+        .filter((response) => kept.has(response.id))
+        .map((response) => response.updated_at)
+        .sort();
+      this.baseline = {
+        reason: payload ? 'tampered' : seenVersion > 0 ? 'missing' : 'none',
+        itemCount: items.length,
+        oldestUpdate: dates[0] ?? null,
+        newestUpdate: dates.at(-1) ?? null,
+        previouslySeenVersion: seenVersion,
+      };
     }
     this.manifest = manifest;
     this.warnings = warnings;
     this.items = items;
     return items;
+  }
+
+  /** The baseline waiting for the user's decision, if any (popup only). */
+  async pendingBaseline(): Promise<PendingBaselineInfo | null> {
+    await this.getItems();
+    return this.baseline;
+  }
+
+  /**
+   * The user accepted the vault as loaded, in the popup: writes its first
+   * trusted manifest and records the decision in the revision ledger.
+   */
+  async acceptBaseline(): Promise<void> {
+    await this.getItems();
+    const pending = this.baseline;
+    if (!pending || !this.manifest) throw new Error('There is no baseline to accept.');
+    const session = await this.requireSession();
+    const manifest = nextManifest(this.manifest, {}, CLIENT_NAME);
+    await this.call(async (s) =>
+      s.api.putManifest(s.token, await this.encryptManifestPayload(manifest, s.vaultKey)),
+    );
+    this.manifest = manifest;
+    this.baseline = null;
+    await this.ledger(session).acceptBaseline({
+      version: manifest.version,
+      itemCount: pending.itemCount,
+      reason: pending.reason,
+      acceptedAt: new Date(this.deps.now()).toISOString(),
+    });
+  }
+
+  /** This device's vault checkpoint (popup only); null until a manifest is trusted. */
+  async checkpoint(): Promise<VaultCheckpoint | null> {
+    await this.getItems();
+    const session = await this.requireSession();
+    if (this.baseline || !this.manifest || this.manifest.version < 1) return null;
+    return vaultCheckpoint(this.manifest, session.vaultKey);
+  }
+
+  /** Compares this device's checkpoint with one typed into the popup. */
+  async verifyCheckpoint(text: string): Promise<CheckpointVerification> {
+    const current = await this.checkpoint();
+    if (!current) throw new Error('Confirm your vault first: there’s no checkpoint yet.');
+    let claimed: VaultCheckpoint;
+    try {
+      claimed = parseCheckpoint(text);
+    } catch (error) {
+      if (error instanceof CryptoInputError) throw new Error(error.message, { cause: error });
+      throw error;
+    }
+    return {
+      result: await compareCheckpoints(current, claimed),
+      currentVersion: current.version,
+      claimedVersion: claimed.version,
+    };
   }
 
   /** What the last load's integrity checks found, for the popup to show. */
@@ -545,6 +623,12 @@ export class Vault {
   /** Saves (encrypt-then-send, like the web vault) or discards the tab's pending credential. */
   async resolvePendingSave(tabId: number, save: boolean): Promise<void> {
     const pending = await this.getPending(tabId);
+    // Checked before the offer is discarded, so the credential is still there
+    // to save once the user has confirmed the vault in the popup.
+    if (save && pending) {
+      await this.getItems();
+      if (this.baseline) throw new BaselineRequiredError();
+    }
     await this.deps.session.remove(pendingKey(tabId));
     if (!pending || !save) return;
 
@@ -589,6 +673,9 @@ export class Vault {
   ): Promise<void> {
     for (let attempt = 0; ; attempt++) {
       const items = await this.getItems();
+      // Any write moves the manifest on, which would make the unconfirmed
+      // vault the baseline without asking.
+      if (this.baseline) throw new BaselineRequiredError();
       const session = await this.requireSession();
       const existing = existingId ? items.find((item) => item.id === existingId) : undefined;
       if (existingId && !existing) throw new Error('That login is no longer in your vault');

@@ -505,3 +505,14 @@ textarea {
   letter-spacing: 0.08em;
   color: var(--gold-bright);
 }
+
+/* Vault checkpoint: tucked away until needed. */
+.checkpoint-section {
+  font-size: 12.5px;
+  margin-top: 0.5rem;
+}
+
+.checkpoint {
+  font-family: var(--mono, monospace);
+  word-break: break-all;
+}

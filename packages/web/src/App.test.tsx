@@ -380,9 +380,67 @@ describe('item revisions', () => {
     expect(
       await screen.findByRole('listitem', { name: legacyItem.site }, { timeout: 10_000 }),
     ).toBeInTheDocument();
+    // With no manifest to check against, nothing is written until the user
+    // accepts what the server sent as the baseline.
+    const prompt = await screen.findByRole('region', { name: 'Confirm this vault' });
+    expect(prompt).toHaveTextContent('Use this as the trusted baseline?');
+    expect(prompt).toHaveTextContent(/sent 2 items/);
+    expect(prompt).toHaveTextContent(/last changed between/);
+    expect(server.users.get('alice@example.com')!.manifest).toBeNull();
+    expect(server.items.get(id)!.revision).toBe(0);
+    expect(screen.getByRole('button', { name: 'Add item' })).toBeDisabled();
+
+    await user.click(within(prompt).getByRole('button', { name: 'Use as trusted baseline' }));
     await waitFor(() => expect(server.items.get(id)!.revision).toBe(1));
+    expect(screen.queryByRole('region', { name: 'Confirm this vault' })).not.toBeInTheDocument();
+    expect(server.users.get('alice@example.com')!.manifest).not.toBeNull();
+    // The decision is recorded in this browser's revision ledger.
+    const accepted = JSON.parse(
+      localStorage.getItem('password-manager.baseline:alice@example.com')!,
+    );
+    expect(accepted).toMatchObject({ itemCount: 2, reason: 'none', version: 1 });
     // It's in the vault's new manifest, so the next load is clean.
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('keeps an unconfirmed vault read-only when the baseline is declined', async () => {
+    const user = userEvent.setup();
+    await signUpAndAddItem(user);
+    await user.click(screen.getByRole('button', { name: 'Lock now' }));
+    server.users.get('alice@example.com')!.manifest = null;
+    localStorage.clear();
+
+    await unlock(user, PASSWORD);
+    const prompt = await screen.findByRole(
+      'region',
+      { name: 'Confirm this vault' },
+      { timeout: 10_000 },
+    );
+    const writeRequests = () =>
+      server.requests.filter((r) => r.method !== 'GET' && !r.url.endsWith('/logout'));
+    const writesBefore = writeRequests().length;
+    await user.click(within(prompt).getByRole('button', { name: 'Not now' }));
+    expect(await screen.findByRole('status', { name: 'Vault not confirmed' })).toHaveTextContent(
+      'read-only',
+    );
+    expect(screen.getByRole('button', { name: 'Add item' })).toBeDisabled();
+
+    // Trying to change an item anyway is refused before anything is sent.
+    const row = screen.getByRole('listitem', { name: ITEM.site });
+    await user.click(within(row).getByRole('button', { name: 'Edit' }));
+    const form = screen.getByRole('form', { name: 'Edit item' });
+    await user.type(within(form).getByLabelText('Notes'), ' more');
+    await user.click(within(form).getByRole('button', { name: 'Save' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(/Confirm this vault/);
+    expect(writeRequests()).toHaveLength(writesBefore);
+    expect(server.users.get('alice@example.com')!.manifest).toBeNull();
+
+    // It asks again next time.
+    await user.click(screen.getByRole('button', { name: 'Lock now' }));
+    await unlock(user, PASSWORD);
+    expect(
+      await screen.findByRole('region', { name: 'Confirm this vault' }, { timeout: 10_000 }),
+    ).toBeInTheDocument();
   });
 
   it('reloads instead of overwriting an item that changed elsewhere', async () => {
@@ -396,6 +454,81 @@ describe('item revisions', () => {
     await user.type(within(form).getByLabelText('Notes'), ' (edited)');
     await user.click(within(form).getByRole('button', { name: 'Save' }));
     expect(await within(form).findByRole('alert')).toHaveTextContent(/changed elsewhere/);
+  });
+});
+
+describe('vault checkpoint', () => {
+  async function openCheckpoint(user: User) {
+    await user.click(screen.getByRole('button', { name: 'Security' }));
+    const section = screen.getByRole('region', { name: 'Vault checkpoint' });
+    const shown = (await within(section).findByTestId('vault-checkpoint')).textContent!;
+    return { section, shown };
+  }
+
+  async function verify(user: User, section: HTMLElement, text: string) {
+    const input = within(section).getByLabelText('Checkpoint from another device');
+    await user.clear(input);
+    await user.type(input, text);
+    await user.click(within(section).getByRole('button', { name: 'Verify checkpoint' }));
+  }
+
+  it('shows this device’s checkpoint, and checks one typed in from elsewhere', async () => {
+    const user = userEvent.setup();
+    await signUpAndAddItem(user);
+    await user.click(screen.getByRole('button', { name: 'I’ve saved it' }));
+    const { section, shown } = await openCheckpoint(user);
+    // Signup wrote version 1; adding the item made it 2.
+    const [, version, fingerprint] = /^(\d+) · ([A-Z2-7-]{19})$/.exec(shown)!;
+    expect(version).toBe('2');
+
+    // Typed loosely, it still matches.
+    await verify(user, section, `v2 ${fingerprint!.toLowerCase().replace(/-/g, ' ')}`);
+    expect(within(section).getByRole('status')).toHaveTextContent('Match');
+
+    // Same version, different fingerprint.
+    const other = fingerprint!.startsWith('A')
+      ? `B${fingerprint!.slice(1)}`
+      : `A${fingerprint!.slice(1)}`;
+    await verify(user, section, `2 · ${other}`);
+    expect(within(section).getByRole('alert')).toHaveTextContent('Different fingerprint');
+
+    // A checkpoint from a newer vault than this device sees: a rollback.
+    await verify(user, section, `5 · ${fingerprint}`);
+    expect(within(section).getByRole('alert')).toHaveTextContent(
+      'older vault than your checkpoint',
+    );
+
+    // An older checkpoint is expected once the vault has moved on.
+    await verify(user, section, `1 · ${fingerprint}`);
+    expect(within(section).getByRole('status')).toHaveTextContent('earlier version (1)');
+
+    await verify(user, section, 'not a checkpoint');
+    expect(within(section).getByRole('alert')).toHaveTextContent('isn’t a checkpoint');
+  });
+
+  it('is in the emergency kit, and says nothing about item ids', async () => {
+    const user = userEvent.setup();
+    await signUpAndAddItem(user);
+    await user.click(screen.getByRole('button', { name: 'I’ve saved it' }));
+    const { shown } = await openCheckpoint(user);
+    await user.click(screen.getByRole('button', { name: 'Show emergency kit' }));
+    const kit = await screen.findByRole('region', { name: 'Emergency kit' });
+    await waitFor(() => expect(kit).toHaveTextContent(shown));
+    const [id] = [...server.items.keys()];
+    for (const part of id!.split('-')) expect(kit.textContent).not.toContain(part.toUpperCase());
+  });
+
+  it('isn’t shown for a vault whose baseline hasn’t been confirmed', async () => {
+    const user = userEvent.setup();
+    await signUpAndAddItem(user);
+    await user.click(screen.getByRole('button', { name: 'Lock now' }));
+    server.users.get(EMAIL)!.manifest = null;
+    localStorage.clear();
+    await unlock(user, PASSWORD);
+    await screen.findByRole('region', { name: 'Confirm this vault' }, { timeout: 10_000 });
+    await user.click(screen.getByRole('button', { name: 'Security' }));
+    const section = screen.getByRole('region', { name: 'Vault checkpoint' });
+    expect(await within(section).findByText(/no checkpoint until you confirm/)).toBeInTheDocument();
   });
 });
 

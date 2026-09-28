@@ -1,21 +1,22 @@
 import react from '@vitejs/plugin-react';
+import { fileURLToPath } from 'node:url';
 import { defineConfig, loadEnv, type Plugin, type ProxyOptions } from 'vite';
+import { CONTENT_SECURITY_POLICY } from './build/csp';
+import { buildIntegrity } from './build/integrity-plugin';
+
+const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url));
+
+// Output names depend only on file contents (no timestamps, no build paths),
+// so the same source and lockfile give byte-identical output; see
+// `npm run verify-build`. Spelled out so a Vite default can't change them.
+const OUTPUT_NAMES = {
+  entryFileNames: 'assets/[name]-[hash].js',
+  chunkFileNames: 'assets/[name]-[hash].js',
+  assetFileNames: 'assets/[name]-[hash][extname]',
+};
 
 // Applied to production builds only: the dev server needs inline scripts for
-// hot reloading. 'wasm-unsafe-eval' lets libsodium compile its WebAssembly;
-// everything else is locked to this origin.
-const CONTENT_SECURITY_POLICY = [
-  "default-src 'self'",
-  "script-src 'self' 'wasm-unsafe-eval'",
-  "style-src 'self'",
-  // Have I Been Pwned's range API, for the opt-in breach check (hash prefixes only).
-  "connect-src 'self' https://api.pwnedpasswords.com",
-  "img-src 'self' data:",
-  "object-src 'none'",
-  "base-uri 'none'",
-  "form-action 'none'",
-].join('; ');
-
+// hot reloading. The policy itself is in build/csp.ts.
 function contentSecurityPolicy(): Plugin {
   return {
     name: 'content-security-policy',
@@ -37,14 +38,17 @@ export default defineConfig(({ mode }) => {
     '/api': { target: apiUrl, changeOrigin: true, rewrite: (path) => path.replace(/^\/api/, '') },
   };
   return {
-    plugins: [react(), contentSecurityPolicy()],
+    plugins: [react(), contentSecurityPolicy(), buildIntegrity({ repoRoot: REPO_ROOT })],
     server: { proxy },
     preview: { proxy },
     // libsodium's sumo build (Argon2id) embeds ~700 kB of WebAssembly, and
     // zxcvbn's English dictionary is ~1.2 MB; it's loaded only when a
     // strength meter first appears.
-    build: { chunkSizeWarningLimit: 1300 },
+    build: {
+      chunkSizeWarningLimit: 1300,
+      rolldownOptions: { output: OUTPUT_NAMES },
+    },
     // The KDF worker (src/vault/kdf.worker.ts) is a module worker.
-    worker: { format: 'es' },
+    worker: { format: 'es', rolldownOptions: { output: OUTPUT_NAMES } },
   };
 });

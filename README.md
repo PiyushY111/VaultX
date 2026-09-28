@@ -2,6 +2,13 @@
 
 ## Project overview
 
+> **Status:** 0.1.0, pre-1.0, and **not independently audited**. See
+> [SECURITY.md](SECURITY.md) for how to report a vulnerability and what's
+> in scope, [THREAT_MODEL.md](THREAT_MODEL.md) for what VaultX does and
+> doesn't protect against, and [docs/AUDIT_SCOPE.md](docs/AUDIT_SCOPE.md)
+> for a reviewer's map of the code. Changes are in
+> [CHANGELOG.md](CHANGELOG.md).
+
 VaultX is a self-hosted, zero-knowledge password manager. You run the server; it stores
 only ciphertext. Your master password, and every key that can decrypt your
 vault, stay on your devices:
@@ -17,7 +24,11 @@ vault, stay on your devices:
 - **You can change your master password**, which also rotates the vault key
   and re-encrypts every item, and see or end every session.
 - **An encrypted vault manifest** lists every item and revision, so any
-  device can tell when the server hides, adds or rolls back items.
+  device can tell when the server hides, adds or rolls back items. A vault
+  without one isn't trusted silently: you're asked to confirm it first. A
+  **vault checkpoint** (version plus a fingerprint only your vault key can
+  compute) lets you compare devices, or your emergency kit, to catch a
+  server serving an older copy of the whole vault.
 - **Optional two-factor login**: authenticator app codes, or **passkeys**,
   which can't be phished (with an option to require a passkey and turn
   authenticator codes off), plus recovery codes. Also **account deletion**,
@@ -136,7 +147,19 @@ API_URL=http://127.0.0.1:3000 npm run test:e2e -w @password-manager/extension  #
 ```
 
 Repo-wide checks: `npm run lint`, `npm run format:check`,
-`npm run typecheck`, `npm run build`.
+`npm run typecheck`, `npm run build`, and `npm run audit` (known advisories
+in runtime dependencies; policy in SECURITY.md).
+
+The test suites include seeded randomized (fuzz) tests for every parser of
+untrusted input. `FUZZ_RUNS=<n>` runs more cases, and `FUZZ_SEED=<seed>`
+replays the seed a failure prints.
+
+Web builds are reproducible. `npm run verify-build -w @password-manager/web`
+checks a build against published SHA256SUMS; the release process is in
+[packages/web/README.md](packages/web/README.md#releases-and-verification).
+This helps people who check. It doesn't protect anyone from a malicious
+server who doesn't (THREAT_MODEL.md §1); the browser extension is the safer
+client.
 
 ## Future Work
 

@@ -1,16 +1,51 @@
 import { validateKdfParams, type KdfParams } from '@password-manager/crypto';
+import { TRUSTED_TYPES_POLICY } from '../../build/csp';
 import { derivePasswordKeysHere, type PasswordKeys } from './kdfCore';
 import type { KdfRequest, KdfResponse } from './kdf.worker';
+// The bundled worker's URL (Vite builds it as its own module).
+import kdfWorkerUrl from './kdf.worker.ts?worker&url';
 
 export type { PasswordKeys } from './kdfCore';
 
 class WorkerUnavailableError extends Error {}
 
+interface TrustedTypesFactory {
+  createPolicy(
+    name: string,
+    rules: { createScriptURL(url: string): string },
+  ): {
+    createScriptURL(url: string): unknown;
+  };
+}
+
+let workerPolicy: ReturnType<TrustedTypesFactory['createPolicy']> | null | undefined;
+
+/**
+ * The CSP requires Trusted Types for script URLs, so `new Worker()` needs one
+ * from a policy. This is the only policy the CSP allows, and it returns only
+ * the KDF worker's own URL, so it can't be used to load anything else.
+ * Browsers without Trusted Types get the plain URL.
+ */
+function kdfWorkerScriptUrl(): string {
+  if (workerPolicy === undefined) {
+    const factory = (globalThis as { trustedTypes?: TrustedTypesFactory }).trustedTypes;
+    workerPolicy =
+      factory?.createPolicy(TRUSTED_TYPES_POLICY, {
+        createScriptURL: (url) => {
+          if (url !== kdfWorkerUrl) throw new TypeError(`Refusing worker script ${url}`);
+          return url;
+        },
+      }) ?? null;
+  }
+  // A TrustedScriptURL where supported; the DOM typings only know strings.
+  return (workerPolicy?.createScriptURL(kdfWorkerUrl) ?? kdfWorkerUrl) as string;
+}
+
 function deriveInWorker(request: KdfRequest): Promise<PasswordKeys> {
   return new Promise((resolve, reject) => {
     let worker: Worker;
     try {
-      worker = new Worker(new URL('./kdf.worker.ts', import.meta.url), { type: 'module' });
+      worker = new Worker(kdfWorkerScriptUrl(), { type: 'module' });
     } catch {
       reject(new WorkerUnavailableError());
       return;

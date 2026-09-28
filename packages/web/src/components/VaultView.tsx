@@ -15,8 +15,11 @@ import {
   VaultSync,
   countWarnings,
   type LoadedVault,
+  type PendingBaseline,
   type VaultWarnings,
 } from '../vault/sync';
+import { formatCheckpoint, vaultCheckpoint } from '@password-manager/crypto';
+import { BaselinePrompt } from './BaselinePrompt';
 import { EmergencyKit } from './EmergencyKit';
 import { HealthPanel } from './HealthPanel';
 import { Emblem, KeyholeIcon } from './Emblem';
@@ -78,6 +81,9 @@ export function VaultView({
   const [items, setItems] = useState<VaultItem[] | null>(null);
   const [warnings, setWarnings] = useState<VaultWarnings>(NO_WARNINGS);
   const [lastChanged, setLastChanged] = useState<LoadedVault['lastChanged']>(null);
+  const [baseline, setBaseline] = useState<PendingBaseline | null>(null);
+  const [baselineDeclined, setBaselineDeclined] = useState(false);
+  const [kitCheckpoint, setKitCheckpoint] = useState<string | null>(null);
   const [query, setQuery] = useState('');
   const [tag, setTag] = useState<string | null>(null);
   const [favoritesOnly, setFavoritesOnly] = useState(false);
@@ -99,8 +105,37 @@ export function VaultView({
     const loaded = await sync.current!.load();
     setWarnings(loaded.warnings);
     setLastChanged(loaded.lastChanged);
+    setBaseline(loaded.baseline);
     setItems(loaded.items);
   }, []);
+
+  const getCheckpoint = useCallback(async () => {
+    const manifest = sync.current!.trustedManifest();
+    return manifest ? vaultCheckpoint(manifest, session.vaultKey) : null;
+  }, [session.vaultKey]);
+
+  // The emergency kit prints the checkpoint as of now.
+  useEffect(() => {
+    if (!showKit || items === null) return;
+    let active = true;
+    void getCheckpoint().then((checkpoint) => {
+      if (active) setKitCheckpoint(checkpoint ? formatCheckpoint(checkpoint) : null);
+    });
+    return () => {
+      active = false;
+    };
+  }, [showKit, items, getCheckpoint]);
+
+  async function acceptBaseline() {
+    try {
+      const upgraded = await sync.current!.acceptBaseline(items ?? []);
+      setItems(upgraded);
+      setBaseline(null);
+      setBaselineDeclined(false);
+    } catch (err) {
+      handleError(err);
+    }
+  }
 
   useEffect(() => {
     let active = true;
@@ -244,8 +279,22 @@ export function VaultView({
           </p>
         )}
         <WarningList warnings={warnings} />
+        {baseline && (
+          <BaselinePrompt
+            baseline={baseline}
+            declined={baselineDeclined}
+            onAccept={acceptBaseline}
+            onDecline={() => setBaselineDeclined(true)}
+            onReview={() => setBaselineDeclined(false)}
+          />
+        )}
         {showKit && (
-          <EmergencyKit email={session.email} onDone={() => setShowKit(false)} firstTime />
+          <EmergencyKit
+            email={session.email}
+            onDone={() => setShowKit(false)}
+            firstTime
+            checkpoint={kitCheckpoint}
+          />
         )}
 
         {view === 'health' ? (
@@ -280,10 +329,13 @@ export function VaultView({
             session={session}
             items={items}
             changeBlockedReason={
-              countWarnings(warnings) > 0
-                ? 'Some items couldn’t be verified (see above), so the vault can’t be re-encrypted under a new key without losing them.'
-                : null
+              baseline
+                ? 'Confirm this vault as your trusted baseline first (see the vault page).'
+                : countWarnings(warnings) > 0
+                  ? 'Some items couldn’t be verified (see above), so the vault can’t be re-encrypted under a new key without losing them.'
+                  : null
             }
+            getCheckpoint={getCheckpoint}
             currentManifest={() => sync.current!.currentManifest()}
             onPasswordChanged={(updated, manifest) => {
               sync.current!.replaceManifest(manifest);
@@ -332,6 +384,8 @@ export function VaultView({
               <button
                 type="button"
                 className="btn btn-primary"
+                disabled={baseline !== null}
+                title={baseline ? 'Confirm this vault first' : undefined}
                 onClick={() => setEditing({ mode: 'new' })}
               >
                 Add item

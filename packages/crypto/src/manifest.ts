@@ -90,8 +90,11 @@ export async function encryptManifest(
 
 /**
  * Decrypts the manifest the server says is at `version`. Throws
- * {@link DecryptionError} if it was tampered with, written under another
- * key, or is really a different version.
+ * {@link DecryptionError} for anything wrong with the data: tampered, written
+ * under another key, really a different version, a malformed nonce or
+ * version from the server, or a plaintext that isn't a well-formed manifest.
+ * Callers treat that as "this manifest can't be trusted". Only a malformed
+ * `vaultKey` (a caller bug) is a {@link CryptoInputError}.
  */
 export async function decryptManifest(
   ciphertext: Uint8Array,
@@ -100,9 +103,14 @@ export async function decryptManifest(
   version: number,
 ): Promise<VaultManifest> {
   assertBytes(vaultKey, KEY_BYTES, 'vaultKey');
-  assertBytes(nonce, NONCE_BYTES, 'nonce');
-  const aad = manifestAad(version);
-  if (!(ciphertext instanceof Uint8Array) || ciphertext.length < TAG_BYTES) {
+  if (
+    !(nonce instanceof Uint8Array) ||
+    nonce.length !== NONCE_BYTES ||
+    !(ciphertext instanceof Uint8Array) ||
+    ciphertext.length < TAG_BYTES ||
+    !Number.isSafeInteger(version) ||
+    version < 1
+  ) {
     throw new DecryptionError();
   }
   const sodium = await getSodium();
@@ -111,21 +119,40 @@ export async function decryptManifest(
     plaintext = sodium.crypto_aead_xchacha20poly1305_ietf_decrypt(
       null,
       ciphertext,
-      sodium.from_string(aad),
+      sodium.from_string(manifestAad(version)),
       nonce,
       vaultKey,
     );
   } catch {
     throw new DecryptionError();
   }
-  const record = JSON.parse(sodium.to_string(plaintext)) as Record<string, unknown>;
-  if (record.v !== MANIFEST_FORMAT || record.version !== version) throw new DecryptionError();
-  return validate({
-    version: record.version,
-    items: record.items,
-    updatedAt: record.updated_at,
-    updatedBy: record.updated_by,
-  });
+  // Authentic, so written by a vault-key holder; still checked, since a buggy
+  // client could have written anything.
+  let record: unknown;
+  try {
+    record = JSON.parse(sodium.to_string(plaintext));
+  } catch {
+    throw new DecryptionError();
+  }
+  if (typeof record !== 'object' || record === null) throw new DecryptionError();
+  const {
+    v,
+    version: recordVersion,
+    items,
+    updated_at,
+    updated_by,
+  } = record as Record<string, unknown>;
+  if (v !== MANIFEST_FORMAT || recordVersion !== version) throw new DecryptionError();
+  try {
+    return validate({
+      version: recordVersion,
+      items,
+      updatedAt: updated_at,
+      updatedBy: updated_by,
+    });
+  } catch {
+    throw new DecryptionError();
+  }
 }
 
 export interface ItemVersion {

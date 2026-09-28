@@ -57,14 +57,43 @@ all traffic that reaches the server.
 
 **Not solved**
 
-- **Malicious web app code.** If the operator also serves the web app (the
-  normal self-hosted setup), they can ship JavaScript that captures the
-  master password or decrypted items. Nothing in the web client can defend
-  against the party that serves it; this is the fundamental limit of
-  browser-delivered end-to-end encryption. The CSP limits _third-party_
-  script injection, not the operator. Mitigations for later: subresource
-  integrity with published hashes, reproducible builds, or using only the
-  extension (or a future native app) as the client.
+- **Malicious web app code. This is not solved, and can't be for a web app.**
+  If the operator also serves the web app (the normal self-hosted setup),
+  they can ship JavaScript that captures the master password or decrypted
+  items. Nothing in the web client can defend against the party that serves
+  it; this is the fundamental limit of browser-delivered end-to-end
+  encryption. What the build measures do, exactly:
+  - **Reproducible builds with published SHA256SUMS**
+    (`npm run verify-build -w @password-manager/web`): anyone can rebuild a
+    release from source and confirm it matches the published hashes. With
+    `--site`, they can also check that the files a server sent them match.
+    That detects a changed build, **for the person who runs the check, at the
+    time they run it.** A server can send modified code to one user, or only
+    once, and send the published files to everyone who checks.
+  - **Subresource Integrity** on the entry script and stylesheet: the browser
+    refuses those files if they don't match the `index.html` they came with.
+    That catches a tampered script or stylesheet from a cache or CDN in front
+    of the server, as long as it didn't change `index.html` too.
+    It does nothing against the server, which serves `index.html` too and
+    can change the hashes with the files. Chunks loaded later and the KDF
+    worker have no SRI (the CSP forbids the inline import map it would take);
+    they are covered only by SHA256SUMS.
+  - **The build hash in the Security panel** is computed by the page's own
+    code from the build manifest, so modified code can show the published
+    value. It helps a user notice an unannounced or accidental change. It
+    proves nothing about a deliberate one.
+  - **The CSP**, including Trusted Types, limits _injected_ code: markup or
+    strings that reach `innerHTML`, `eval` or a script URL (XSS), and where a
+    page can send data (`connect-src`). It can't stop code that is part of
+    the build, whether it came from the operator or from a compromised
+    dependency, and the operator writes the CSP anyway.
+
+  For users who don't verify, none of this changes anything: they run
+  whatever the server sends. **The browser extension is the safer client.**
+  Its code is built and installed locally, not fetched from the vault
+  server on each visit, so a malicious operator can't change it. You can
+  audit and verify it once, instead of trusting every page load.
+
 - **Offline guessing.** The operator holds everything needed to test
   password guesses: salt, params, and the wrapped vault key or the stored
   auth-hash hash. Each guess costs one Argon2id evaluation (64 MiB by
@@ -412,21 +441,50 @@ Replaying or rearranging previously valid ciphertexts or credentials.
 - **Password change rotates the vault key**, so an attacker who unwrapped
   the old vault key with a stolen password can't read anything saved
   afterwards, and can't forge new items.
+- **No silent trust on first use.** A vault with no manifest a client can
+  trust (it never had one, a manifest this device saw has vanished, or it
+  fails to decrypt) loads read-only. Nothing is written until the user
+  confirms it as the baseline, after being shown how many items there are
+  and the server's dates for them. A declined baseline stays read-only and
+  asks again next time. In the extension only the popup can confirm: content
+  scripts can't send that message, so a web page can't make the extension
+  trust what the server sent. The accepted baseline is recorded in the
+  device's revision ledger. New accounts get their first manifest from the
+  client that creates them, so they're never asked.
+- **Vault checkpoints.** The Security page (and the extension's popup) shows
+  the manifest's version plus an 80-bit fingerprint of exactly which items
+  and revisions it lists: HMAC-SHA256 under a key derived from the vault key
+  (HKDF, `password-manager:v1:checkpoint`). The emergency kit prints it.
+  Typed into another device, it shows a match, a **mismatch** (same version,
+  different contents: a forked or substituted vault) or a **rollback** (this
+  device sees an older version than the checkpoint). Without the vault key
+  the fingerprint can't be computed or tested, so it tells the server, or
+  whoever reads a printed kit, nothing about the items. The version number
+  is visible, and says how many times the vault has changed (the server
+  knows that anyway).
 
 **Not solved**
 
-- **A whole older copy, on a fresh device.** A server can replay an entire
-  earlier state (old manifest plus the matching old items) to a device with
-  no history (a new device, cleared profile, or private window). It's
-  internally consistent, so nothing can prove it's not the latest. The web
-  vault shows when and from which app the vault last changed, so a person
-  who changed it since can notice. Devices that have seen a newer version
-  catch it.
-- **Trust on first use for the first manifest.** Vaults from before the
-  manifest existed get their first one from whichever client loads them
-  first, based on what that client could verify. Items saved before
-  revision binding (revision 0) use the old, unbound format until a client
-  re-saves them (the web vault does so on load).
+- **A whole older copy, on a fresh device, is only detectable by a person.**
+  A server can replay an entire earlier state (old manifest plus the
+  matching old items) to a device with no history (a new device, cleared
+  profile, or private window). It's internally consistent, so the device
+  can't tell on its own that it isn't the latest. It's caught only if the
+  user compares the **checkpoint** with one from a device, or an emergency
+  kit, that saw a newer version, or notices the **"last changed" timestamp**
+  is older than a change they made. Devices that have seen a newer version
+  catch it automatically. A printed checkpoint gets outdated with every
+  change: a newer version on the device than on the paper is expected, and
+  can't be checked against the paper. Only the same version can be compared
+  exactly.
+- **The baseline is only as good as the user's judgement.** Confirming a
+  legacy vault trusts what the server sent at that moment. If the server was
+  already hiding items then, the baseline won't show them as missing later.
+  The prompt says so and suggests checking from another device first. The
+  shown dates come from the server and aren't authenticated.
+- Items saved before revision binding (revision 0) use the old, unbound
+  format until a client re-saves them. The web vault does so once the
+  vault has a trusted manifest.
 - **Auth-hash replay.** A captured auth hash (from an unencrypted connection
   or a compromised client) works as a login credential until the password
   is changed. It still doesn't decrypt anything.

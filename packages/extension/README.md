@@ -46,6 +46,11 @@ After rebuilding, click the reload icon on the extension's card.
 - **Two-factor:** if the account has it on, the popup asks for the code after
   the password. The derived keys wait in the background worker's memory
   (never storage) for up to five minutes.
+- **Baseline and checkpoint:** like the web vault, a vault with no
+  trustworthy manifest is read-only until you confirm it, and only the popup
+  can confirm it (content scripts can't, so a page can't). The popup's
+  "Vault checkpoint" section shows the checkpoint and verifies one from
+  another device.
 - **No passkeys:** WebAuthn from an extension popup doesn't work reliably,
   and passkeys are bound to the web vault's origin. The extension accepts
   TOTP and recovery codes only. For an account that needs a passkey

@@ -1,6 +1,6 @@
 {
   "name": "@password-manager/extension",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "description": "Browser extension client",
   "type": "module",
@@ -15,7 +15,7 @@
     "clean": "rm -rf dist test-results playwright-report"
   },
   "dependencies": {
-    "@password-manager/crypto": "^0.0.0"
+    "@password-manager/crypto": "0.1.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.63.0",

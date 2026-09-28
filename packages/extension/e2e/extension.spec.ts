@@ -84,6 +84,7 @@ async function api<T>(
     ...(init.body ? { body: JSON.stringify(init.body) } : {}),
   });
   if (!response.ok) throw new Error(`${path}: ${response.status} ${await response.text()}`);
+  if (response.status === 204) return undefined as T;
   return (await response.json()) as T;
 }
 
@@ -107,7 +108,16 @@ async function createAccount(): Promise<Account> {
       kdf_params: DEFAULT_KDF_PARAMS,
     },
   });
-  return { email, password, authHash: b64(authHash), vaultKey };
+  const account = { email, password, authHash: b64(authHash), vaultKey };
+  // Like the web vault's signup: the new account's first (empty) manifest,
+  // so the extension has a trusted baseline and doesn't ask for one.
+  const first = await encryptManifest(nextManifest(null, {}, 'web'), vaultKey);
+  await api('/vault-manifest', {
+    method: 'PUT',
+    token: await apiToken(account),
+    body: { version: 1, encrypted_data: b64(first.ciphertext), nonce: b64(first.nonce) },
+  });
+  return account;
 }
 
 async function apiToken(account: Account): Promise<string> {
@@ -430,6 +440,46 @@ test('clears a password copied in the popup after 30 seconds, even once the popu
         intervals: [2_000],
       })
       .toBe('');
+  } finally {
+    await context.close();
+  }
+});
+
+test('asks in the popup before trusting a vault whose manifest can’t be verified', async ({
+  userDataDir,
+}) => {
+  const account = await createAccount();
+  await addItem(account, { site: 'kept.example.com', username: 'me', password: 'pw' });
+  // The server now holds a manifest that doesn't open with the vault key
+  // (the server itself can't tell): the extension has nothing to trust.
+  const token = await apiToken(account);
+  const bogus = await encryptManifest(nextManifest(null, {}, 'attacker'), await generateVaultKey());
+  await api('/vault-manifest', {
+    method: 'PUT',
+    token,
+    body: { version: 3, encrypted_data: b64(bogus.ciphertext), nonce: b64(bogus.nonce) },
+  });
+  const version = async () =>
+    (await api<{ manifest: { version: number } }>('/vault-items', { token })).manifest.version;
+
+  const { context, extensionId } = await launch(userDataDir);
+  try {
+    const popup = await openPopup(context, extensionId);
+    await unlockInPopup(popup, account);
+    const box = popup.getByRole('region', { name: 'Confirm this vault' });
+    await expect(box).toContainText('Use this as the trusted baseline?');
+    await expect(box).toContainText('1 item');
+    await expect(popup.getByRole('button', { name: 'Add login' })).toBeDisabled();
+    // Unlocking and listing wrote nothing.
+    expect(await version()).toBe(3);
+
+    await box.getByRole('button', { name: 'Use as trusted baseline' }).click();
+    await expect(popup.getByRole('region', { name: 'Confirm this vault' })).toBeHidden();
+    await expect(popup.getByRole('button', { name: 'Add login' })).toBeEnabled();
+    expect(await version()).toBe(4);
+    // The new baseline opens with the real key and lists the item.
+    const { decrypted } = await listItems(account);
+    expect(decrypted.map((item) => item.site)).toEqual(['kept.example.com']);
   } finally {
     await context.close();
   }

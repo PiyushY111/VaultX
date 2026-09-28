@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_SETTINGS } from '../src/background/settings';
+import { formatCheckpoint, vaultCheckpoint } from '@password-manager/crypto';
 import {
+  BaselineRequiredError,
   LockedError,
   PENDING_SAVE_TTL_MS,
   SecondFactorRequiredError,
@@ -438,13 +440,13 @@ describe('passkey-only accounts', () => {
 });
 
 describe('vault manifest', () => {
-  it('writes a first manifest on load, and moves it on with every save', async () => {
+  it('moves the manifest on with every save', async () => {
     const vault = makeVault();
     await vault.unlock(EMAIL, PASSWORD);
     await vault.listForPopup();
-    expect(server.state.manifest!.version).toBe(1);
+    const before = server.state.manifest!.version;
     await vault.addItem({ site: 'new.example.com', username: 'u', password: 'p', notes: '' });
-    expect(server.state.manifest!.version).toBe(2);
+    expect(server.state.manifest!.version).toBe(before + 1);
     expect(await vault.vaultWarnings()).toEqual({
       failed: 0,
       rolledBack: 0,
@@ -460,7 +462,7 @@ describe('vault manifest', () => {
     await first.listForPopup();
     const bank = server.items.find((item) => item.id !== githubId)!;
     server.items.splice(server.items.indexOf(bank), 1);
-    await server.seedItem(vaultKey, {
+    await server.plantItem(vaultKey, {
       site: 'planted.example.com',
       username: '',
       password: '',
@@ -486,6 +488,105 @@ describe('vault manifest', () => {
     const sites = (await makeVault().listForPopup()).map((item) => item.site);
     expect(sites).toEqual(expect.arrayContaining(['other.example.com', 'mine.example.com']));
     expect(await makeVault().vaultWarnings()).toMatchObject({ missing: 0, unexpected: 0 });
+  });
+});
+
+describe('first-manifest baseline', () => {
+  const writes = () => server.requests.filter((r) => r.method !== 'GET').length;
+
+  it('never creates a baseline on its own, even when a web page triggers the load', async () => {
+    server.makeLegacy();
+    const vault = makeVault();
+    await vault.unlock(EMAIL, PASSWORD);
+    const before = writes();
+    // What a content script's autofill request does.
+    await vault.matchesForUrl('https://github.com/login');
+    await vault.listForPopup();
+    expect(writes()).toBe(before);
+    expect(server.state.manifest).toBeNull();
+    expect(await vault.pendingBaseline()).toMatchObject({
+      reason: 'none',
+      itemCount: 2,
+      previouslySeenVersion: 0,
+    });
+    expect(await vault.checkpoint()).toBeNull();
+  });
+
+  it('refuses to save while the baseline is unconfirmed (including from a page’s save prompt)', async () => {
+    server.makeLegacy();
+    const vault = makeVault();
+    await vault.unlock(EMAIL, PASSWORD);
+    const before = writes();
+    await expect(
+      vault.addItem({ site: 'new.example.com', username: 'u', password: 'p', notes: '' }),
+    ).rejects.toThrow(BaselineRequiredError);
+    expect(writes()).toBe(before);
+    expect(server.state.manifest).toBeNull();
+  });
+
+  it('keeps a page’s pending save offer when it can’t be saved yet', async () => {
+    server.makeLegacy();
+    const vault = makeVault();
+    await vault.unlock(EMAIL, PASSWORD);
+    await vault.captureCredential(7, 'https://new.example.com/login', 'me', 'pw-NEW');
+    await expect(vault.resolvePendingSave(7, true)).rejects.toThrow(BaselineRequiredError);
+    expect(await vault.pendingSavePrompt(7)).not.toBeNull();
+    await vault.acceptBaseline();
+    await vault.resolvePendingSave(7, true);
+    expect((await vault.listForPopup()).map((item) => item.site)).toContain('new.example.com');
+  });
+
+  it('writes the baseline once accepted, and records it in the ledger', async () => {
+    server.makeLegacy();
+    const vault = makeVault();
+    await vault.unlock(EMAIL, PASSWORD);
+    await vault.acceptBaseline();
+    expect(server.state.manifest!.version).toBe(1);
+    expect(await vault.pendingBaseline()).toBeNull();
+    expect(await local.get(`baseline:${EMAIL}`)).toMatchObject({
+      version: 1,
+      itemCount: 2,
+      reason: 'none',
+    });
+    await vault.addItem({ site: 'new.example.com', username: 'u', password: 'p', notes: '' });
+    expect(server.state.manifest!.version).toBe(2);
+    expect(await makeVault().vaultWarnings()).toMatchObject({ missing: 0, unexpected: 0 });
+  });
+
+  it('asks again after a lock if it was declined (never accepted)', async () => {
+    server.makeLegacy();
+    const vault = makeVault();
+    await vault.unlock(EMAIL, PASSWORD);
+    expect(await vault.pendingBaseline()).not.toBeNull();
+    await vault.lock();
+    await vault.unlock(EMAIL, PASSWORD);
+    expect(await vault.pendingBaseline()).not.toBeNull();
+  });
+});
+
+describe('vault checkpoint', () => {
+  it('matches the web vault’s, and reports a mismatch, a rollback, or an older checkpoint', async () => {
+    const vault = makeVault();
+    await vault.unlock(EMAIL, PASSWORD);
+    const current = (await vault.checkpoint())!;
+    // The same value the web vault computes from the same manifest and key.
+    expect(current).toEqual(await vaultCheckpoint(server.plainManifest!, vaultKey));
+    const text = formatCheckpoint(current);
+
+    expect((await vault.verifyCheckpoint(text)).result).toBe('match');
+    const other = `${current.version} · ${current.fingerprint.startsWith('A') ? 'B' : 'A'}${current.fingerprint.slice(1)}`;
+    expect((await vault.verifyCheckpoint(other)).result).toBe('mismatch');
+    expect(await vault.verifyCheckpoint(`${current.version + 3} · ${current.fingerprint}`)).toEqual(
+      {
+        result: 'rollback',
+        currentVersion: current.version,
+        claimedVersion: current.version + 3,
+      },
+    );
+    expect((await vault.verifyCheckpoint(`1 · ${current.fingerprint}`)).result).toBe(
+      'older-checkpoint',
+    );
+    await expect(vault.verifyCheckpoint('nonsense')).rejects.toThrow(/isn’t a checkpoint/);
   });
 });
 

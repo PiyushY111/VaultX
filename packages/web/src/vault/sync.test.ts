@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { installFakeServer, type FakeServer } from '../../test/fakeServer';
 import { createRevisionLedger } from './revisionLedger';
 import { signUp, type VaultSession } from './session';
-import { VaultChangedError, VaultSync } from './sync';
+import { compareCheckpoints, vaultCheckpoint } from '@password-manager/crypto';
+import { BaselineRequiredError, VaultChangedError, VaultSync } from './sync';
 
 const EMAIL = 'alice@example.com';
 const PASSWORD = 'MASTER-correct-horse-battery-staple-41';
@@ -25,7 +26,7 @@ const thisDevice = () => new VaultSync(session, createRevisionLedger(EMAIL));
 const user = () => server.users.get(EMAIL)!;
 
 describe('vault manifest', () => {
-  it('is written on first load, then moves on with every write', async () => {
+  it('is written at signup, then moves on with every write', async () => {
     const sync = thisDevice();
     const empty = await sync.load();
     expect(empty.items).toEqual([]);
@@ -135,5 +136,145 @@ describe('createMany (import)', () => {
     const loaded = await freshDevice().load();
     expect(loaded.items).toHaveLength(data.length);
     expect(loaded.warnings.missingIds).toEqual([]);
+  });
+});
+
+describe('first-manifest baseline (trust on first use)', () => {
+  /** A vault from before manifests: items, no manifest. */
+  async function legacyVault() {
+    const sync = thisDevice();
+    await sync.load();
+    await sync.create(item('a.example.com'));
+    user().manifest = null;
+    localStorage.clear();
+  }
+
+  it('loads a legacy vault read-only, writing nothing, until the baseline is accepted', async () => {
+    await legacyVault();
+    const sync = freshDevice();
+    const writes = () => server.requests.filter((r) => r.method !== 'GET').length;
+    const before = writes();
+    const loaded = await sync.load();
+    expect(loaded.items).toHaveLength(1);
+    expect(loaded.baseline).toMatchObject({
+      reason: 'none',
+      itemCount: 1,
+      previouslySeenVersion: 0,
+    });
+    expect(loaded.baseline!.newestUpdate).toEqual(expect.any(String));
+    expect(sync.trustedManifest()).toBeNull();
+    await expect(sync.create(item('b.example.com'))).rejects.toThrow(BaselineRequiredError);
+    expect(() => sync.currentManifest()).toThrow(BaselineRequiredError);
+    expect(writes()).toBe(before);
+    expect(user().manifest).toBeNull();
+
+    await sync.acceptBaseline(loaded.items);
+    expect(user().manifest!.version).toBe(1);
+    expect(sync.baseline()).toBeNull();
+    await sync.create(item('b.example.com'));
+    expect(user().manifest!.version).toBe(2);
+  });
+
+  it('records the accepted baseline in the revision ledger', async () => {
+    await legacyVault();
+    const ledger = createRevisionLedger(EMAIL);
+    const sync = new VaultSync(session, ledger);
+    await sync.acceptBaseline((await sync.load()).items);
+    expect(ledger.baseline()).toMatchObject({ version: 1, itemCount: 1, reason: 'none' });
+    expect(ledger.manifestVersion()).toBe(1);
+    // And the next load, on this device, has nothing to ask.
+    expect((await thisDevice().load()).baseline).toBeNull();
+  });
+
+  it('a declined baseline stays pending, and nothing is written, load after load', async () => {
+    await legacyVault();
+    for (let i = 0; i < 2; i++) {
+      const loaded = await thisDevice().load();
+      expect(loaded.baseline?.reason).toBe('none');
+    }
+    expect(user().manifest).toBeNull();
+  });
+
+  it('asks too when a manifest this browser saw has gone missing, and says so', async () => {
+    const sync = thisDevice();
+    await sync.load();
+    await sync.create(item('a.example.com'));
+    await sync.create(item('b.example.com'));
+    user().manifest = null;
+    const ledger = createRevisionLedger(EMAIL);
+    const again = new VaultSync(session, ledger);
+    const loaded = await again.load();
+    expect(loaded.warnings.manifest).toBe('missing');
+    expect(loaded.baseline).toMatchObject({ reason: 'missing', previouslySeenVersion: 3 });
+    await again.acceptBaseline(loaded.items);
+    // Accepting starts over from the new baseline, so it isn't reported as stale later.
+    expect(ledger.manifestVersion()).toBe(1);
+    expect((await thisDevice().load()).warnings.manifest).toBeNull();
+  });
+
+  it('asks when the manifest fails its integrity check, and writes the next version', async () => {
+    const sync = thisDevice();
+    await sync.load();
+    await sync.create(item('a.example.com'));
+    user().manifest = { ...user().manifest!, version: 7 };
+    const fresh = freshDevice();
+    const loaded = await fresh.load();
+    expect(loaded.baseline?.reason).toBe('tampered');
+    await fresh.acceptBaseline(loaded.items);
+    expect(user().manifest!.version).toBe(8);
+  });
+});
+
+describe('vault checkpoint across devices', () => {
+  const checkpointOf = async (sync: VaultSync) =>
+    vaultCheckpoint(sync.trustedManifest()!, session.vaultKey);
+
+  it('matches on two devices that see the same vault', async () => {
+    const here = thisDevice();
+    await here.load();
+    await here.create(item('a.example.com'));
+    const there = freshDevice();
+    await there.load();
+    expect(await compareCheckpoints(await checkpointOf(there), await checkpointOf(here))).toBe(
+      'match',
+    );
+  });
+
+  it('shows a rollback when a new device is served a consistent older copy', async () => {
+    const here = thisDevice();
+    await here.load();
+    await here.create(item('a.example.com'));
+    const oldManifest = { ...user().manifest! };
+    const oldItems = new Map([...server.items].map(([id, value]) => [id, { ...value }]));
+    await here.create(item('b.example.com'));
+    const trusted = await checkpointOf(here);
+
+    // The server rewinds everything to before b. A new device sees nothing wrong...
+    user().manifest = oldManifest;
+    server.items.clear();
+    for (const [id, value] of oldItems) server.items.set(id, value);
+    const newDevice = freshDevice();
+    const loaded = await newDevice.load();
+    expect(loaded.warnings.manifest).toBeNull();
+    // ...until it's given the checkpoint from the device that saw the newer vault.
+    expect(await compareCheckpoints(await checkpointOf(newDevice), trusted)).toBe('rollback');
+  });
+
+  it('shows a mismatch for a different vault at the same version', async () => {
+    const here = thisDevice();
+    await here.load();
+    const start = { ...user().manifest! };
+    await here.create(item('a.example.com'));
+    const mine = await checkpointOf(here);
+
+    // The server rewinds and lets another change take the same version number.
+    user().manifest = start;
+    server.items.clear();
+    const other = freshDevice();
+    await other.load();
+    await other.create(item('different.example.com'));
+    const theirs = await checkpointOf(other);
+    expect(theirs.version).toBe(mine.version);
+    expect(await compareCheckpoints(theirs, mine)).toBe('mismatch');
   });
 });

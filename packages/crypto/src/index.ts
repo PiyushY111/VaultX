@@ -31,3 +31,11 @@ export {
 } from './manifest.js';
 export { decryptBackup, encryptBackup } from './backup.js';
 export { parseTotp, totpCode, type TotpConfig } from './totp.js';
+export {
+  compareCheckpoints,
+  formatCheckpoint,
+  parseCheckpoint,
+  vaultCheckpoint,
+  type CheckpointComparison,
+  type VaultCheckpoint,
+} from './checkpoint.js';

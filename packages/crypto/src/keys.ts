@@ -18,7 +18,7 @@ export interface DerivedKeys {
 const HASH_BYTES = 32;
 
 /** HKDF-Extract (RFC 5869) with HMAC-SHA256 and an empty salt. */
-function hkdfExtract(sodium: Sodium, ikm: Uint8Array): Uint8Array {
+export function hkdfExtract(sodium: Sodium, ikm: Uint8Array): Uint8Array {
   // An absent salt is defined as HashLen zero bytes, which is also what an
   // empty HMAC key pads to.
   const salt = new Uint8Array(HASH_BYTES);
@@ -26,7 +26,12 @@ function hkdfExtract(sodium: Sodium, ikm: Uint8Array): Uint8Array {
 }
 
 /** HKDF-Expand (RFC 5869) with HMAC-SHA256. */
-function hkdfExpand(sodium: Sodium, prk: Uint8Array, info: string, length: number): Uint8Array {
+export function hkdfExpand(
+  sodium: Sodium,
+  prk: Uint8Array,
+  info: string,
+  length: number,
+): Uint8Array {
   const infoBytes = sodium.from_string(info);
   const out = new Uint8Array(length);
   let previous: Uint8Array = new Uint8Array(0);

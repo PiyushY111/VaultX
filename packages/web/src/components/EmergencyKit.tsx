@@ -5,10 +5,17 @@ interface Props {
   onDone: () => void;
   /** Shown straight after signup, with more urgency. */
   firstTime?: boolean;
+  /** The vault checkpoint right now (formatted), if the vault has a trusted manifest. */
+  checkpoint?: string | null;
 }
 
 /** The kit's text. It never includes the master password: that's written in by hand. */
-export function emergencyKitText(email: string, server: string, date = new Date()): string {
+export function emergencyKitText(
+  email: string,
+  server: string,
+  date = new Date(),
+  checkpoint: string | null = null,
+): string {
   return [
     'VAULTX EMERGENCY KIT',
     '====================',
@@ -30,6 +37,19 @@ export function emergencyKitText(email: string, server: string, date = new Date(
     'Keep this sheet somewhere safe and private, such as with other important',
     'papers. If you use two-factor login, keep your recovery codes separately.',
     '',
+    ...(checkpoint
+      ? [
+          'Vault checkpoint',
+          '----------------',
+          `${checkpoint}   (on the date above)`,
+          '',
+          'On a new device, open Security > Vault checkpoint and compare. The first',
+          'number (the version) should be this one or higher, since it grows with',
+          'every change; at the same version, the rest must match exactly. It is',
+          'computed with your vault key, so it reveals nothing about your vault.',
+          '',
+        ]
+      : []),
   ].join('\n');
 }
 
@@ -37,9 +57,9 @@ export function emergencyKitText(email: string, server: string, date = new Date(
  * The "emergency kit": a sheet to print or download, with where the vault
  * lives and a blank for the master password to be written in by hand.
  */
-export function EmergencyKit({ email, onDone, firstTime = false }: Props) {
+export function EmergencyKit({ email, onDone, firstTime = false, checkpoint = null }: Props) {
   const server = window.location.origin;
-  const text = emergencyKitText(email, server);
+  const text = emergencyKitText(email, server, new Date(), checkpoint);
   return (
     <section className="sheet kit" aria-label="Emergency kit">
       <h2>{firstTime ? 'Save your emergency kit' : 'Emergency kit'}</h2>

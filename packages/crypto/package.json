@@ -1,6 +1,6 @@
 {
   "name": "@password-manager/crypto",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "description": "Client-side cryptographic primitives (key derivation, vault encryption)",
   "type": "module",
@@ -18,7 +18,7 @@
     "vitest": "^4.1.11"
   },
   "dependencies": {
-    "libsodium-wrappers-sumo": "^0.8.4"
+    "libsodium-wrappers-sumo": "0.8.4"
   },
   "files": [
     "dist"

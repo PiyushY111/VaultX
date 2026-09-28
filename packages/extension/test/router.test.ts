@@ -109,6 +109,13 @@ describe('handleMessage authorization', () => {
     },
   );
 
+  it('never lets a web page create or accept a vault baseline, or probe the checkpoint', () => {
+    for (const type of ['getBaseline', 'acceptBaseline', 'getCheckpoint', 'verifyCheckpoint']) {
+      expect(CONTENT_REQUEST_TYPES.has(type as never), type).toBe(false);
+      expect(POPUP_REQUEST_TYPES.has(type as never), type).toBe(true);
+    }
+  });
+
   it('rejects unknown senders and malformed messages', async () => {
     expect(await handleMessage({ type: 'getState' }, null, deps)).toMatchObject({ ok: false });
     expect(await handleMessage('getState', popup, deps)).toMatchObject({ ok: false });

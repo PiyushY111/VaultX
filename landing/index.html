@@ -103,7 +103,7 @@
       <div class="section-heading">
         <span class="kicker">Security Architecture</span>
         <h2 class="title">How It Works</h2>
-        <p class="desc">Three mathematical guarantees ensure complete privacy.</p>
+        <p class="desc">Three design choices that keep your vault private from the server. Their limits are listed in THREAT_MODEL.md.</p>
       </div>
 
       <div class="pillars-grid">
@@ -138,7 +138,7 @@
             The Fastify + PostgreSQL backend only ever handles opaque ciphertext strings.
           </p>
           <ul class="pillar-list">
-            <li><strong>Zero Plaintext Leaks:</strong> Audited by tests that scan raw database tables.</li>
+            <li><strong>No plaintext in the database:</strong> checked by tests that scan every raw database table.</li>
             <li><strong>RAM Purging:</strong> Keys and plaintexts are wiped with <code>sodium.memzero</code> on lock or idle timeout.</li>
           </ul>
         </div>

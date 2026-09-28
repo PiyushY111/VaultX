@@ -1,4 +1,4 @@
-import type { VaultManifest } from '@password-manager/crypto';
+import type { VaultCheckpoint, VaultManifest } from '@password-manager/crypto';
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { ApiError, api, type AccountInfo, type SessionInfo } from '../api';
 import {
@@ -15,6 +15,8 @@ import {
   proveCurrentPassword,
   type VaultSession,
 } from '../vault/session';
+import { BuildInfoSection } from './BuildInfoSection';
+import { CheckpointSection } from './CheckpointSection';
 import { PasskeysSection } from './PasskeysSection';
 import { QrCode } from './QrCode';
 import {
@@ -37,6 +39,8 @@ interface Props {
   /** The vault's current manifest (re-encrypted along with the items on a password change). */
   currentManifest: () => VaultManifest;
   onPasswordChanged: (items: VaultItem[], manifest: VaultManifest) => void;
+  /** This device's vault checkpoint; null while no manifest is trusted yet. */
+  getCheckpoint: () => Promise<VaultCheckpoint | null>;
   onShowEmergencyKit: () => void;
   onSignedOutEverywhere: () => void;
   onAccountDeleted: () => void;
@@ -71,6 +75,8 @@ export function SecurityPanel(props: Props) {
       <TwoFactorSection {...sectionProps} />
       <PasskeysSection {...sectionProps} />
       <SessionList {...props} />
+      <CheckpointSection getCheckpoint={props.getCheckpoint} />
+      <BuildInfoSection />
       <div className="sheet" role="region" aria-label="Emergency kit">
         <h3>Emergency kit</h3>
         <p className="hint">

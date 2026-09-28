@@ -43,6 +43,26 @@ export interface VaultState {
   settings: Settings;
 }
 
+/** A vault with no manifest the extension can trust (see the web vault's sync.ts). */
+export interface PendingBaselineInfo {
+  reason: 'none' | 'missing' | 'tampered';
+  itemCount: number;
+  oldestUpdate: string | null;
+  newestUpdate: string | null;
+  previouslySeenVersion: number;
+}
+
+/** The vault checkpoint, formatted ("42 · ABCD-EFGH-IJKL-MNOP"); null until there's a trusted manifest. */
+export interface CheckpointInfo {
+  checkpoint: string | null;
+}
+
+export interface CheckpointVerification {
+  result: 'match' | 'mismatch' | 'rollback' | 'older-checkpoint';
+  currentVersion: number;
+  claimedVersion: number;
+}
+
 export interface PendingSavePrompt {
   kind: 'new' | 'update';
   host: string;
@@ -64,7 +84,13 @@ export type PopupRequest =
   | { type: 'getWarnings' }
   | { type: 'getTotpCode'; itemId: string }
   /** Sent after the popup copies a password, so the background can clear it later. */
-  | { type: 'scheduleClipboardClear' };
+  | { type: 'scheduleClipboardClear' }
+  /** The vault has no trusted manifest yet: what would become the baseline. */
+  | { type: 'getBaseline' }
+  /** The user accepted it, in the popup. Content scripts can never send this. */
+  | { type: 'acceptBaseline' }
+  | { type: 'getCheckpoint' }
+  | { type: 'verifyCheckpoint'; checkpoint: string };
 
 /** Requests only a content script (top frame of an http(s) tab) may make. */
 export type ContentRequest =
@@ -137,6 +163,10 @@ export const POPUP_REQUEST_TYPES = new Set<PopupRequest['type']>([
   'getWarnings',
   'getTotpCode',
   'scheduleClipboardClear',
+  'getBaseline',
+  'acceptBaseline',
+  'getCheckpoint',
+  'verifyCheckpoint',
 ]);
 
 export const CONTENT_REQUEST_TYPES = new Set<ContentRequest['type']>([

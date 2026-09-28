@@ -1,3 +1,8 @@
+/** The only error parseCsv throws: the text isn't well-formed CSV. */
+export class CsvFormatError extends Error {
+  override name = 'CsvFormatError';
+}
+
 /**
  * RFC 4180 CSV: comma-separated, fields optionally in double quotes, with ""
  * for a literal quote; quoted fields may contain commas and line breaks.
@@ -38,7 +43,7 @@ export function parseCsv(text: string): string[][] {
       endRow();
     } else field += char;
   }
-  if (quoted) throw new Error('The file ends inside a quoted field; it may be cut off.');
+  if (quoted) throw new CsvFormatError('The file ends inside a quoted field; it may be cut off.');
   if (field !== '' || row.length > 0) endRow();
   return rows;
 }

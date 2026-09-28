@@ -472,11 +472,79 @@ encrypted_data, nonce}`), at exactly the stored version + 1. The server
   hidden; items it lists that weren't returned are reported as missing. A
   manifest that fails to decrypt, is older than one this device has seen,
   or has vanished is reported too.
-- A vault with no manifest yet (created before migration 004) gets one from
-  the first client that loads it (`PUT /vault-manifest`, trust on first use).
+- A new account's first manifest (version 1, empty) is written by the web
+  vault right after signup (`PUT /vault-manifest`). The client created the
+  vault, so there's nothing to confirm.
 
 It can't prove to a device with no history that it's the _latest_ manifest,
-so the web vault shows "last changed … from …" for a person to judge.
+so the web vault shows "last changed … from …" for a person to judge, and
+both clients show a checkpoint (below) to compare.
+
+#### No silent trust on first use
+
+When a load finds no manifest the client can trust, it doesn't adopt the
+server's items as the truth. This happens when there's no manifest at all
+(`none`, a vault from before migration 004), when this device's ledger has
+seen one and the server now has none (`missing`), or when the server's
+manifest doesn't decrypt (`tampered`). Instead
+(`packages/web/src/vault/sync.ts`, `packages/extension/src/background/vault.ts`):
+
+- The vault loads **read-only**. What could be verified becomes the
+  candidate baseline, at the version after the server's. Every write
+  (create, update, delete, import, password change, re-saving legacy items)
+  throws `BaselineRequiredError` before anything is sent.
+- The user is shown the item count, the server's oldest and newest item
+  dates (unauthenticated), the reason, and the version this device saw
+  before, if any. Then: "Use this as the trusted baseline?"
+- **Accepting** writes the candidate as the next manifest and records
+  `{version, itemCount, reason, acceptedAt}` in the device's revision ledger
+  (web: `localStorage` `password-manager.baseline:<email>`; extension:
+  `chrome.storage.local` `baseline:<email>`). It also sets the ledger's seen
+  manifest version to the baseline's, even if that's lower: the user chose
+  to start over, and later loads shouldn't call the new baseline "stale".
+- **Declining** ("Not now") keeps the vault read-only, writes nothing, and
+  asks again on the next load.
+- **In the extension**, a load can be started by a content script (a page
+  asking for autofill matches), so loading never writes. Only the popup can
+  send `acceptBaseline` (it's not in `CONTENT_REQUEST_TYPES`). A page's
+  "save this password?" prompt fails with a message pointing to the popup,
+  and keeps the captured credential until then.
+
+Decisions where the requirements left room, taking the more conservative
+option:
+
+- The prompt also covers `missing` and `tampered` manifests, not only
+  legacy vaults. Before this change those were repaired silently on the
+  next write, which is the same trust-on-first-use.
+- Signup writes the first manifest itself, instead of asking a new user to
+  confirm an empty vault.
+- A declined baseline blocks all writes, rather than allowing "just this
+  one": any write moves the manifest on and would make the candidate the
+  baseline.
+
+#### Vault checkpoint
+
+`packages/crypto/src/checkpoint.ts`. The version of the trusted manifest,
+plus a fingerprint of its exact contents:
+
+```
+checkpoint key = HKDF-SHA256(vault key, info "password-manager:v1:checkpoint")   [32 bytes]
+fingerprint    = first 80 bits of HMAC-SHA256(checkpoint key, JSON([version, [[id, revision], …sorted by id]]))
+shown as       "42 · ABCD-EFGH-IJKL-MNOP"   (version · 16 base32 characters)
+```
+
+It covers exactly what the manifest proves (which items, at which
+revisions), not the timestamp or client name, so every device with the same
+manifest shows the same checkpoint. Comparing: equal versions must have
+equal fingerprints (`match`, or `mismatch`); a checkpoint newer than this
+device's manifest is a `rollback`; an older one is expected once the vault
+has changed, and can't be checked further. The web vault shows it on the
+Security page and prints it in the emergency kit; the extension shows it in
+the popup. Both have a "Verify checkpoint" box. The key never leaves the
+client, and without it the fingerprint can't be computed, tested or
+brute-forced, so a server can't craft a different vault that shows the same
+checkpoint. (80 bits is short enough to read aloud; the security rests on
+the key, not on the length.)
 
 ## Data model
 
@@ -621,5 +689,52 @@ subdomain, ignoring `www.`.
   reverse proxy. Docker Compose publishes it on `127.0.0.1` only.
 - The web app calls same-origin `/api/*`. In development Vite proxies it; in
   production, serve the web build and the API behind the same proxy.
-- Production builds of the web app ship a strict CSP: `script-src 'self'
-'wasm-unsafe-eval'`, `connect-src 'self'`, with no inline scripts or styles.
+- Production builds of the web app ship a strict CSP (`build/csp.ts`):
+  `script-src 'self' 'wasm-unsafe-eval'`, `connect-src 'self'` plus Have I
+  Been Pwned's range API, no inline scripts or styles, and Trusted Types
+  (`require-trusted-types-for 'script'` with a single allowed policy, which
+  only ever returns the KDF worker's URL). A `<meta>` CSP can't set
+  `frame-ancestors`; send `Content-Security-Policy: frame-ancestors 'none'`
+  (or `X-Frame-Options: DENY`) from the reverse proxy.
+
+### Web build integrity
+
+The web build is reproducible, and every build describes itself
+(`packages/web/build/integrity-plugin.ts`):
+
+- `dist/index.html` carries `integrity="sha384-…"` on its entry script and
+  stylesheet. Icon links don't get one: browsers ignore integrity there, and
+  an icon can't run code.
+- `dist/SHA256SUMS` lists the SHA-256 of every file in the build, in
+  `sha256sum -c` format, sorted by path. The **build hash** is the SHA-256 of
+  that file.
+- `dist/build-manifest.json` has the same hashes, the build hash, the SRI
+  values, exact package versions from `package-lock.json`, the Node
+  version, and the git commit and whether the tree had uncommitted changes
+  (read with `git rev-parse HEAD` and `git --no-optional-locks status`, which
+  don't write to the repository). It isn't in SHA256SUMS, because those
+  details differ between builds of the same code.
+
+**Reproducibility.** The build depends only on the source and the lockfile:
+the bundle's dependencies are pinned to exact versions, output file names
+are content hashes (set explicitly in `vite.config.ts`), and nothing embeds
+a timestamp or a build path. `test/build-output.test.ts` builds twice and
+checks the output is byte-identical and path-free.
+`npm run verify-build` rebuilds in a fresh temporary directory with
+`npm ci` and compares against a published SHA256SUMS. A different Node or
+npm major version could still change the output; the manifest records the
+Node version used.
+
+**The Security panel's build hash** (`src/lib/buildInfo.ts`) is recomputed
+by the page from `build-manifest.json`. The page also checks that the
+script and stylesheet it loaded carry the SRI values the manifest lists.
+What this can and can't show is in THREAT_MODEL.md §1: the page reports on
+itself, so it can't catch deliberately modified code.
+
+**Trusted Types.** The KDF worker used to be created with
+`new Worker(new URL(…))`, a string-to-script sink. It is now created from
+Vite's `?worker&url` import through the one allowed policy. The production
+e2e suite runs under the enforced policy in Chrome and checks that the app
+triggers no violations, that `innerHTML` from a string is refused, and that
+no second policy can be created. Browsers without Trusted Types ignore
+the directives.

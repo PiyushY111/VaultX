@@ -18,6 +18,20 @@ export interface ItemVersion {
   revision: number;
 }
 
+/**
+ * The user's decision to trust a vault that had no usable manifest: the
+ * first manifest this browser wrote after asking (see sync.ts).
+ */
+export interface AcceptedBaseline {
+  /** The manifest version written as the baseline. */
+  version: number;
+  /** How many items the user accepted. */
+  itemCount: number;
+  /** Why there was no usable manifest. */
+  reason: 'none' | 'missing' | 'tampered';
+  acceptedAt: string;
+}
+
 export interface RevisionLedger {
   /** Ids of items older than a revision this browser has already seen. */
   findRollbacks(items: readonly ItemVersion[]): Set<string>;
@@ -27,6 +41,14 @@ export interface RevisionLedger {
   /** The newest vault manifest version this browser has seen (0 if none). */
   manifestVersion(): number;
   recordManifest(version: number): void;
+  /**
+   * Records an accepted baseline. Unlike recordManifest, this sets the seen
+   * manifest version to the baseline's even if it's lower: the user chose to
+   * start over from it.
+   */
+  acceptBaseline(baseline: AcceptedBaseline): void;
+  /** The last baseline accepted in this browser, if any. */
+  baseline(): AcceptedBaseline | null;
 }
 
 const STORAGE_PREFIX = 'password-manager.revisions:';
@@ -35,6 +57,25 @@ const DELETED = Number.MAX_SAFE_INTEGER;
 const MANIFEST_KEY = '#manifest';
 
 export const revisionStorageKey = (email: string) => `${STORAGE_PREFIX}${email}`;
+export const baselineStorageKey = (email: string) => `password-manager.baseline:${email}`;
+
+function parseBaseline(text: string | null | undefined): AcceptedBaseline | null {
+  try {
+    const value = JSON.parse(text ?? 'null') as Partial<AcceptedBaseline> | null;
+    if (
+      value &&
+      Number.isSafeInteger(value.version) &&
+      Number.isSafeInteger(value.itemCount) &&
+      typeof value.acceptedAt === 'string' &&
+      ['none', 'missing', 'tampered'].includes(value.reason as string)
+    ) {
+      return value as AcceptedBaseline;
+    }
+  } catch {
+    // Corrupt: as if none.
+  }
+  return null;
+}
 
 function defaultStorage(): Storage | null {
   try {
@@ -52,6 +93,7 @@ export function createRevisionLedger(
   // Kept in memory too, so detection still works for this page's lifetime if
   // storage is unavailable (private mode, quota).
   let known: Record<string, number> = {};
+  let acceptedBaseline: AcceptedBaseline | null = null;
 
   function load(): Record<string, number> {
     try {
@@ -101,6 +143,24 @@ export function createRevisionLedger(
       known = load();
       known[MANIFEST_KEY] = Math.max(known[MANIFEST_KEY] ?? 0, version);
       save();
+    },
+    acceptBaseline(baseline) {
+      known = load();
+      known[MANIFEST_KEY] = baseline.version;
+      save();
+      acceptedBaseline = baseline;
+      try {
+        storage?.setItem(baselineStorageKey(email), JSON.stringify(baseline));
+      } catch {
+        // Keep the in-memory copy.
+      }
+    },
+    baseline() {
+      try {
+        return parseBaseline(storage?.getItem(baselineStorageKey(email))) ?? acceptedBaseline;
+      } catch {
+        return acceptedBaseline;
+      }
     },
   };
 }

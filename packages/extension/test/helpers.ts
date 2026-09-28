@@ -2,9 +2,12 @@ import {
   DEFAULT_KDF_PARAMS,
   deriveKeys,
   deriveMasterKey,
+  encryptManifest,
   encryptVaultKey,
   generateSalt,
   generateVaultKey,
+  nextManifest,
+  type VaultManifest,
 } from '@password-manager/crypto';
 import type { KeyValueStore } from '../src/background/storage';
 import { encryptVaultItem, type VaultItemData } from '../src/background/items';
@@ -190,6 +193,26 @@ export function createFakeServer() {
       state.recoveryCodes = [...recoveryCodes];
     },
     /** Registers an account the way the web vault would; returns its vault key for seeding items. */
+    /**
+     * The vault's manifest as its owner last wrote it, in plaintext, so
+     * seeded items can be added to it as the web vault would.
+     */
+    plainManifest: null as VaultManifest | null,
+    async writeManifest(vaultKey: Uint8Array, manifest: VaultManifest) {
+      const { ciphertext, nonce } = await encryptManifest(manifest, vaultKey);
+      state.manifest = {
+        version: manifest.version,
+        encrypted_data: toBase64(ciphertext),
+        nonce: toBase64(nonce),
+      };
+      this.plainManifest = manifest;
+    },
+    /** A vault from before manifests existed: items, no manifest. */
+    makeLegacy() {
+      state.manifest = null;
+      this.plainManifest = null;
+    },
+    /** Registers like the web vault: the account, then its first (empty) manifest. */
     async register(email: string, password: string): Promise<Uint8Array> {
       const salt = await generateSalt();
       const masterKey = await deriveMasterKey(password, salt, DEFAULT_KDF_PARAMS);
@@ -203,11 +226,25 @@ export function createFakeServer() {
         encrypted_vault_key: toBase64(wrapped.ciphertext),
         vault_key_nonce: toBase64(wrapped.nonce),
       });
+      await this.writeManifest(vaultKey, nextManifest(null, {}, 'web'));
       return vaultKey;
     },
+    /** An item the server adds on its own: not in the owner's manifest. */
+    async plantItem(vaultKey: Uint8Array, data: VaultItemData): Promise<string> {
+      const payload = await encryptVaultItem(data, vaultKey, crypto.randomUUID(), 1);
+      items.push(payload);
+      return payload.id;
+    },
+    /** Saves an item as the web vault would, moving the manifest on (unless the vault is legacy). */
     async seedItem(vaultKey: Uint8Array, data: VaultItemData, revision = 1): Promise<string> {
       const payload = await encryptVaultItem(data, vaultKey, crypto.randomUUID(), revision);
       items.push(payload);
+      if (this.plainManifest) {
+        await this.writeManifest(
+          vaultKey,
+          nextManifest(this.plainManifest, { set: [{ id: payload.id, revision }] }, 'web'),
+        );
+      }
       return payload.id;
     },
   };

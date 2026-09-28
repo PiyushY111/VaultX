@@ -52,6 +52,11 @@ the app and API share an origin and no CORS is needed. In production, serve
   Adding or removing a passkey takes the master password and an existing
   second factor. The passkey never leaves the authenticator; the page only
   passes the server's challenge to the browser and the signature back.
+- **Baseline and checkpoint** (`src/vault/sync.ts`,
+  `src/components/BaselinePrompt.tsx`, `src/components/CheckpointSection.tsx`):
+  a vault with no trustworthy manifest loads read-only until you confirm it
+  as the baseline. The Security page shows the vault checkpoint and checks
+  one copied from another device; the emergency kit prints it.
 - **Delete account** (Security page) needs the email typed out, the master
   password, and a second factor (passkey, or a code) if one is on.
 - **Emergency kit:** offered after signup and from the Security page, to
@@ -80,8 +85,60 @@ the app and API share an origin and no CORS is needed. In production, serve
 - **Search** runs over decrypted items in memory and never touches the network.
 - **KDF downgrade protection:** the client refuses server-supplied KDF params below
   the crypto package's floor.
-- **Production CSP:** `script-src 'self' 'wasm-unsafe-eval'`, `connect-src 'self'`,
-  no inline scripts or styles.
+- **Production CSP** (`build/csp.ts`): `script-src 'self' 'wasm-unsafe-eval'`,
+  `connect-src 'self'`, no inline scripts or styles, and Trusted Types with
+  one policy (for the KDF worker's URL only). `test/build-output.test.ts`
+  asserts the exact policy and that the built `index.html` has no inline
+  script, handler or style. Send `frame-ancestors 'none'` as an HTTP header
+  from your proxy: a `<meta>` CSP can't set it.
+- **Build integrity:** SRI on the entry script and stylesheet,
+  `dist/SHA256SUMS`, and `dist/build-manifest.json`. The Security page shows
+  the running build's hash. See "Releases and verification" below for what
+  these do and don't prove.
+
+## Releases and verification
+
+The web vault's code comes from whoever serves it, so a user can only trust
+it as far as they can check it. Builds are reproducible so that checking is
+possible. It is never automatic: see THREAT_MODEL.md §1.
+
+**Publishing a release** (maintainers):
+
+1. Tag the release commit, with a signed tag if you can
+   (`git tag -s vX.Y.Z`).
+2. From a clean checkout of the tag: `npm ci`, then
+   `npm run build -w @password-manager/web`.
+3. Check it reproduces:
+   `npm run verify-build -w @password-manager/web -- --ref vX.Y.Z --sums packages/web/dist/SHA256SUMS`.
+4. Publish `packages/web/dist/SHA256SUMS` and its build hash
+   (`sha256sum SHA256SUMS`, which is also what the Security page shows) in
+   the release notes, **somewhere the vault server doesn't control**: a
+   signed release on the code host, or a signature file
+   (`gpg --detach-sign SHA256SUMS`, or minisign). A SHA256SUMS served by the
+   vault server itself proves nothing.
+5. Deploy exactly that `dist/`.
+
+**Verifying** (anyone):
+
+```sh
+# Rebuild the release from source and compare with the published sums:
+npm run verify-build -w @password-manager/web -- --ref vX.Y.Z --sums https://…/SHA256SUMS
+
+# Check what a running server sends you, without rebuilding:
+npm run verify-build -w @password-manager/web -- --sums https://…/SHA256SUMS --site https://vault.example.com
+```
+
+The second check covers only what that server sent to your machine, at
+that moment. Then compare the Security page's build hash with the
+published one. A different hash means you aren't running the published
+code. A matching hash is only reassuring: the page computes it itself. For
+a client whose code doesn't come from the vault server at all, use the
+browser extension.
+
+`verify-build` builds in a temporary directory with `npm ci` (network or
+npm cache required), uses only read-only git commands (`ls-files`,
+`archive`), and exits non-zero on any difference. Build with the same Node
+major version as the release (recorded in `build-manifest.json`).
 
 ## Tests
 

@@ -81,6 +81,18 @@ export async function signUp(emailInput: string, password: string): Promise<Vaul
     // We already hold the vault key, so log in with the same authHash rather
     // than running Argon2id a second time.
     const { token } = await api.login(email, toBase64(authHash));
+    // This client just created the (empty) vault, so it can write the first
+    // manifest without asking anyone to trust anything. If that fails, the
+    // next load finds no manifest and asks the user to confirm the (empty)
+    // vault as the baseline instead, so nothing is lost by carrying on.
+    try {
+      await api.putManifest(
+        token,
+        await encryptManifestPayload(nextManifest(null, {}, CLIENT_NAME), vaultKey),
+      );
+    } catch (error) {
+      if (!(error instanceof ApiError)) throw error;
+    }
     return { email, token, vaultKey };
   } catch (error) {
     wipe(vaultKey);

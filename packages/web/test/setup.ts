@@ -14,16 +14,19 @@ class SameRealmTextEncoder extends NodeTextEncoder {
 Object.assign(globalThis, { TextEncoder: SameRealmTextEncoder });
 
 // Node 25 ships its own experimental localStorage global, which shadows
-// jsdom's and throws without --localstorage-file.
-const { jsdom } = globalThis as unknown as { jsdom: { window: Window } };
-Object.defineProperty(globalThis, 'localStorage', {
-  configurable: true,
-  value: jsdom.window.localStorage,
-});
-Object.defineProperty(globalThis, 'sessionStorage', {
-  configurable: true,
-  value: jsdom.window.sessionStorage,
-});
+// jsdom's and throws without --localstorage-file. (Tests in the node
+// environment, like test/build-output.test.ts, have no jsdom.)
+const { jsdom } = globalThis as unknown as { jsdom?: { window: Window } };
+if (jsdom) {
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true,
+    value: jsdom.window.localStorage,
+  });
+  Object.defineProperty(globalThis, 'sessionStorage', {
+    configurable: true,
+    value: jsdom.window.sessionStorage,
+  });
+}
 
 afterEach(() => {
   cleanup();

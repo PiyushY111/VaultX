@@ -1,4 +1,5 @@
-import { createHmac } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import { expect, test, type Page } from '@playwright/test';
 
 const ITEM = {
@@ -119,6 +120,49 @@ test('derives keys in a Web Worker, allowed by the production CSP', async ({ pag
   await signUp(page, uniqueAccount());
   expect(workers.some((url) => url.includes('kdf.worker'))).toBe(true);
   expect(errors).toEqual([]);
+});
+
+test('enforces Trusted Types without breaking the KDF worker', async ({ page }) => {
+  const workers: string[] = [];
+  page.on('worker', (worker) => workers.push(worker.url()));
+  const { errors } = watch(page);
+  await signUp(page, uniqueAccount());
+  expect(workers.some((url) => url.includes('kdf.worker'))).toBe(true);
+  // The app itself triggers no Trusted Types (or other) violations.
+  expect(errors).toEqual([]);
+  // A string reaching an HTML sink is refused, so injected markup can't become script.
+  const refused = await page.evaluate(() => {
+    try {
+      document.createElement('div').innerHTML = '<img src=x onerror=alert(1)>';
+      return false;
+    } catch (error) {
+      return error instanceof TypeError;
+    }
+  });
+  expect(refused).toBe(true);
+  // The only allowed policy exists already, and no second one can be made.
+  const secondPolicy = await page.evaluate(() => {
+    try {
+      (
+        window as unknown as { trustedTypes: { createPolicy(n: string, r: object): unknown } }
+      ).trustedTypes.createPolicy('attacker', {});
+      return 'created';
+    } catch {
+      return 'refused';
+    }
+  });
+  expect(secondPolicy).toBe('refused');
+});
+
+test('shows the running build hash: SHA-256 of the build’s SHA256SUMS', async ({ page }) => {
+  await signUp(page, uniqueAccount());
+  await page.getByRole('button', { name: 'I’ve saved it' }).click();
+  await page.getByRole('button', { name: 'Security' }).click();
+  const section = page.getByRole('region', { name: 'This build' });
+  const shown = await section.getByTestId('build-hash').getAttribute('aria-label');
+  const sums = await readFile(new URL('../dist/SHA256SUMS', import.meta.url));
+  expect(shown).toBe(createHash('sha256').update(sums).digest('hex'));
+  await expect(section.getByRole('alert')).toHaveCount(0);
 });
 
 test('changes the master password, then only the new one unlocks', async ({ page }) => {
@@ -349,4 +393,38 @@ test('adds a passkey, unlocks with it, and removes it', async ({ page }) => {
   await page.getByLabel('Master password').fill(account.password);
   await page.getByRole('button', { name: 'Unlock' }).click();
   await expect(page.getByRole('listitem', { name: ITEM.site })).toBeVisible();
+});
+
+test('two devices show the same vault checkpoint, and each verifies the other’s', async ({
+  browser,
+}) => {
+  const account = uniqueAccount();
+  const first = await browser.newPage();
+  await signUp(first, account);
+  await first.getByRole('button', { name: 'I’ve saved it' }).click();
+  await addItem(first);
+  await first.getByRole('button', { name: 'Security' }).click();
+  const checkpoint = (await first.getByTestId('vault-checkpoint').textContent())!;
+  expect(checkpoint).toMatch(/^2 · [A-Z2-7]{4}(-[A-Z2-7]{4}){3}$/);
+
+  // A second device: a separate browser profile with no history of this vault.
+  const context = await browser.newContext();
+  const second = await context.newPage();
+  await second.goto('/');
+  await second.getByLabel('Email').fill(account.email);
+  await second.getByLabel('Master password').fill(account.password);
+  await second.getByRole('button', { name: 'Log in' }).click();
+  await expect(second.getByRole('listitem', { name: ITEM.site })).toBeVisible();
+  await second.getByRole('button', { name: 'Security' }).click();
+  const section = second.getByRole('region', { name: 'Vault checkpoint' });
+  await expect(section.getByTestId('vault-checkpoint')).toHaveText(checkpoint);
+  await section.getByLabel('Checkpoint from another device').fill(checkpoint);
+  await section.getByRole('button', { name: 'Verify checkpoint' }).click();
+  await expect(section.getByRole('status')).toContainText('Match');
+  // A checkpoint from a newer version than this device sees is flagged.
+  await section.getByLabel('Checkpoint from another device').fill(checkpoint.replace(/^2/, '9'));
+  await section.getByRole('button', { name: 'Verify checkpoint' }).click();
+  await expect(section.getByRole('alert')).toContainText('older vault than your checkpoint');
+  await context.close();
+  await first.close();
 });

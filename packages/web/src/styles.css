@@ -1135,3 +1135,9 @@ button.link:hover {
   align-items: center;
   gap: 0.6rem;
 }
+
+/* The running build's hash, in groups of four so it's easy to compare by eye. */
+.build-hash {
+  font-family: var(--mono);
+  word-break: break-all;
+}

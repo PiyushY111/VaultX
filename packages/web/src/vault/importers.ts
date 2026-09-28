@@ -1,4 +1,4 @@
-import { parseCsv } from '../lib/csv';
+import { CsvFormatError, parseCsv } from '../lib/csv';
 import { readTotp } from '../lib/useTotp';
 import type { VaultItemData } from './items';
 
@@ -6,6 +6,11 @@ import type { VaultItemData } from './items';
  * Turns another password manager's CSV export into vault items. The file is
  * read in the browser; nothing is sent until the items are encrypted.
  */
+
+/** The only error parseImport throws: the file isn't a usable export. */
+export class ImportFormatError extends Error {
+  override name = 'ImportFormatError';
+}
 
 export type ImportSource = 'Chrome' | 'Firefox' | 'Bitwarden' | '1Password' | 'CSV';
 
@@ -58,8 +63,14 @@ function siteFor(url: string, name: string): string {
 }
 
 export function parseImport(text: string): ParsedImport {
-  const rows = parseCsv(text);
-  if (rows.length === 0) throw new Error('The file is empty.');
+  let rows: string[][];
+  try {
+    rows = parseCsv(text);
+  } catch (error) {
+    if (error instanceof CsvFormatError) throw new ImportFormatError(error.message);
+    throw error;
+  }
+  if (rows.length === 0) throw new ImportFormatError('The file is empty.');
   const headers = rows[0]!.map((header) => header.trim().toLowerCase());
   const index = (names: readonly string[]) => {
     for (const name of names) {
@@ -72,7 +83,7 @@ export function parseImport(text: string): ParsedImport {
     Object.entries(COLUMNS).map(([field, names]) => [field, index(names)]),
   ) as Record<keyof typeof COLUMNS, number>;
   if (at.password === -1 || (at.url === -1 && at.name === -1)) {
-    throw new Error(
+    throw new ImportFormatError(
       'This doesn’t look like a password export: it needs a password column and a URL or name column.',
     );
   }

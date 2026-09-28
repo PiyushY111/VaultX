@@ -12,12 +12,23 @@ export interface ItemVersion {
   revision: number;
 }
 
+/** The user's decision to trust a vault that had no usable manifest (same as the web vault's). */
+export interface AcceptedBaseline {
+  version: number;
+  itemCount: number;
+  reason: 'none' | 'missing' | 'tampered';
+  acceptedAt: string;
+}
+
 export interface RevisionLedger {
   findRollbacks(items: readonly ItemVersion[]): Promise<Set<string>>;
   record(items: readonly ItemVersion[]): Promise<void>;
   /** The newest vault manifest version this browser has seen (0 if none). */
   manifestVersion(): Promise<number>;
   recordManifest(version: number): Promise<void>;
+  /** Records an accepted baseline; sets the seen manifest version to it, even if lower. */
+  acceptBaseline(baseline: AcceptedBaseline): Promise<void>;
+  baseline(): Promise<AcceptedBaseline | null>;
 }
 
 // Stored alongside the item ids, which are UUIDs, so it can't collide.
@@ -47,6 +58,15 @@ export function createRevisionLedger(store: KeyValueStore, email: string): Revis
       const seen = await load();
       seen[MANIFEST_KEY] = Math.max(seen[MANIFEST_KEY] ?? 0, version);
       await store.set(key, seen);
+    },
+    async acceptBaseline(baseline) {
+      const seen = await load();
+      seen[MANIFEST_KEY] = baseline.version;
+      await store.set(key, seen);
+      await store.set(`baseline:${email}`, baseline);
+    },
+    async baseline() {
+      return (await store.get<AcceptedBaseline>(`baseline:${email}`)) ?? null;
     },
   };
 }

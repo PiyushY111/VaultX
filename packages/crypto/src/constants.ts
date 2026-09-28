@@ -23,3 +23,8 @@ export const AAD_ITEM = 'password-manager:v2:item';
 export const AAD_MANIFEST = 'password-manager:v1:manifest';
 /** AAD of an exported backup file (see backup.ts). */
 export const AAD_BACKUP = 'password-manager:v1:backup';
+/**
+ * HKDF info for the vault checkpoint key (see checkpoint.ts): a key derived
+ * from the vault key that is used only to fingerprint manifests.
+ */
+export const HKDF_INFO_CHECKPOINT = 'password-manager:v1:checkpoint';

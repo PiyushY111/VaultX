@@ -3,6 +3,8 @@ import {
   DecryptionError,
   decryptBackup,
   encryptBackup,
+  NONCE_BYTES,
+  SALT_BYTES,
   generateSalt,
   validateKdfParams,
   type KdfParams,
@@ -37,6 +39,66 @@ export class WrongBackupPasswordError extends Error {
     super('That password doesn’t open this backup.');
     this.name = 'WrongBackupPasswordError';
   }
+}
+
+/** The file isn't a readable VaultX backup: not one, a version we don't know, damaged, or edited. */
+export class BackupFormatError extends Error {
+  override name = 'BackupFormatError';
+}
+
+const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+
+function base64Field(value: unknown, name: string): Uint8Array {
+  if (typeof value !== 'string' || !BASE64.test(value)) {
+    throw new BackupFormatError(`This backup file is damaged (${name}).`);
+  }
+  return fromBase64(value);
+}
+
+/** Checks the file's shape before anything in it is used. */
+function parseBackupFile(text: string): {
+  salt: Uint8Array;
+  params: KdfParams;
+  nonce: Uint8Array;
+  ciphertext: Uint8Array;
+} {
+  let file: unknown;
+  try {
+    file = JSON.parse(text);
+  } catch {
+    throw new BackupFormatError('This isn’t a VaultX backup file.');
+  }
+  if (typeof file !== 'object' || file === null || Array.isArray(file)) {
+    throw new BackupFormatError('This isn’t a VaultX backup file.');
+  }
+  const { format, version, kdf, nonce, ciphertext } = file as Record<string, unknown>;
+  if (format !== BACKUP_FORMAT) throw new BackupFormatError('This isn’t a VaultX backup file.');
+  if (version !== BACKUP_VERSION) {
+    throw new BackupFormatError('This backup is from a newer or unknown version of VaultX.');
+  }
+  if (typeof kdf !== 'object' || kdf === null) {
+    throw new BackupFormatError('This backup file is damaged (kdf).');
+  }
+  const { salt, params } = kdf as Record<string, unknown>;
+  // A tampered file mustn't be able to make us run a weak (or huge) KDF.
+  try {
+    validateKdfParams(params as KdfParams);
+  } catch (error) {
+    throw new BackupFormatError(
+      `This backup’s key settings are unsafe or damaged: ${(error as Error).message}`,
+    );
+  }
+  const saltBytes = base64Field(salt, 'salt');
+  const nonceBytes = base64Field(nonce, 'nonce');
+  if (saltBytes.length !== SALT_BYTES || nonceBytes.length !== NONCE_BYTES) {
+    throw new BackupFormatError('This backup file is damaged (salt or nonce length).');
+  }
+  return {
+    salt: saltBytes,
+    params: params as KdfParams,
+    nonce: nonceBytes,
+    ciphertext: base64Field(ciphertext, 'ciphertext'),
+  };
 }
 
 export async function createBackup(
@@ -79,27 +141,43 @@ export function isBackupFile(text: string): boolean {
   }
 }
 
+/**
+ * Opens a backup file. Throws {@link WrongBackupPasswordError} if the
+ * password is wrong (or the ciphertext was tampered with), and
+ * {@link BackupFormatError} for anything else wrong with the file; nothing else.
+ */
 export async function readBackup(text: string, password: string): Promise<VaultItemData[]> {
-  const file = JSON.parse(text) as BackupFile;
-  if (file.format !== BACKUP_FORMAT || file.version !== BACKUP_VERSION) {
-    throw new Error('This backup is from a newer or unknown version of VaultX.');
-  }
-  // A tampered file mustn't be able to make us run a weak (or huge) KDF.
-  validateKdfParams(file.kdf.params);
+  const file = parseBackupFile(text);
   const { stretchedMasterKey: key, authHash } = await derivePasswordKeys(
     password,
-    fromBase64(file.kdf.salt),
-    file.kdf.params,
+    file.salt,
+    file.params,
   );
   wipe(authHash);
+  let json: string;
   try {
-    const json = await decryptBackup(fromBase64(file.ciphertext), fromBase64(file.nonce), key);
-    const { items } = JSON.parse(json) as { items: unknown[] };
-    return items.map((item) => parseItem(JSON.stringify(item)));
+    json = await decryptBackup(file.ciphertext, file.nonce, key);
   } catch (error) {
     if (error instanceof DecryptionError) throw new WrongBackupPasswordError();
     throw error;
   } finally {
     wipe(key);
   }
+  // Authentic, so written by someone with the password; still checked.
+  let items: unknown;
+  try {
+    items = (JSON.parse(json) as { items?: unknown } | null)?.items;
+  } catch {
+    throw new BackupFormatError('This backup’s contents are damaged.');
+  }
+  if (!Array.isArray(items)) throw new BackupFormatError('This backup’s contents are damaged.');
+  return items.map((item, index) => {
+    try {
+      return parseItem(JSON.stringify(item));
+    } catch (error) {
+      throw new BackupFormatError(
+        `Item ${index + 1} in this backup is damaged: ${(error as Error).message}`,
+      );
+    }
+  });
 }

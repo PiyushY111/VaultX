@@ -8,6 +8,7 @@ import {
   type Response,
   type VaultState,
 } from '../shared/messages';
+import { formatCheckpoint } from '@password-manager/crypto';
 import { loadLastEmail, loadSettings, saveLastEmail, saveSettings } from './settings';
 import type { KeyValueStore } from './storage';
 import { LockedError, SecondFactorRequiredError, type Vault } from './vault';
@@ -164,6 +165,18 @@ async function handlePopup(request: PopupRequest, deps: RouterDeps): Promise<Res
       });
       return ok(null);
     }
+    // Baseline and checkpoint: popup only (never in CONTENT_REQUEST_TYPES).
+    case 'getBaseline':
+      return ok(await vault.pendingBaseline());
+    case 'acceptBaseline':
+      await vault.acceptBaseline();
+      return ok(null);
+    case 'getCheckpoint': {
+      const checkpoint = await vault.checkpoint();
+      return ok({ checkpoint: checkpoint && formatCheckpoint(checkpoint) });
+    }
+    case 'verifyCheckpoint':
+      return ok(await vault.verifyCheckpoint(String(request.checkpoint ?? '')));
     case 'scheduleClipboardClear':
       await deps.clipboard.scheduleClear();
       return ok(null);

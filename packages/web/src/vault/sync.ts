@@ -18,7 +18,7 @@ import {
   type VaultItem,
   type VaultItemData,
 } from './items';
-import type { RevisionLedger } from './revisionLedger';
+import type { AcceptedBaseline, RevisionLedger } from './revisionLedger';
 import type { VaultSession } from './session';
 
 /**
@@ -46,11 +46,43 @@ export interface VaultWarnings {
   manifest: 'tampered' | 'stale' | 'missing' | null;
 }
 
+/**
+ * The vault has no manifest this browser can trust, so there's nothing to
+ * check the server's items against. Rather than silently adopting whatever
+ * the server sent as the truth (trust on first use without asking), the
+ * vault loads read-only until the user accepts it as the baseline.
+ */
+export interface PendingBaseline {
+  /**
+   * - `none`: the vault never had a manifest (created before manifests existed).
+   * - `missing`: this browser has seen a manifest before, and the server no longer has one.
+   * - `tampered`: the server's manifest doesn't decrypt under the vault key.
+   */
+  reason: AcceptedBaseline['reason'];
+  /** Items that decrypted and would become the baseline. */
+  itemCount: number;
+  /** The server's (unverified) timestamps for those items. */
+  oldestUpdate: string | null;
+  newestUpdate: string | null;
+  /** The manifest version this browser saw before, if any (0 if none). */
+  previouslySeenVersion: number;
+}
+
 export interface LoadedVault {
   items: VaultItem[];
   warnings: VaultWarnings;
   /** When the vault last changed and from which client, per the manifest. */
   lastChanged: { at: string; by: string } | null;
+  /** Set when the vault needs the user to accept a baseline before it can be changed. */
+  baseline: PendingBaseline | null;
+}
+
+/** A write was attempted before the user accepted the vault's baseline. */
+export class BaselineRequiredError extends Error {
+  constructor() {
+    super('Confirm this vault as your trusted starting point before changing it.');
+    this.name = 'BaselineRequiredError';
+  }
 }
 
 /** The vault changed elsewhere since it was loaded (the manifest moved on). */
@@ -91,6 +123,8 @@ function rethrow(error: unknown): never {
 export class VaultSync {
   /** The manifest the next write builds on. Null only before the first load. */
   private manifest: VaultManifest | null = null;
+  /** Set while the vault waits for the user to accept (or decline) a baseline. */
+  private pendingBaseline: PendingBaseline | null = null;
 
   constructor(
     private readonly session: VaultSession,
@@ -136,30 +170,82 @@ export class VaultSync {
       items = items.filter((item) => !hidden.has(item.id));
       this.manifest = manifest;
       this.ledger.recordManifest(manifest.version);
+      this.pendingBaseline = null;
     } else {
-      // No usable manifest: start one from what this browser could verify, at
-      // the version after the server's, so the next write repairs it. A
-      // vault that never had one gets its first right away.
+      // No usable manifest. What this browser could verify becomes the
+      // candidate baseline, at the version after the server's; nothing is
+      // written until the user accepts it (acceptBaseline).
       this.manifest = {
         version: payload?.version ?? 0,
         items: Object.fromEntries(items.map((item) => [item.id, item.revision])),
         updatedAt: '',
         updatedBy: '',
       };
-      if (!payload) await this.writeManifestOnly();
+      const dates = items.map((item) => item.updatedAt).sort();
+      this.pendingBaseline = {
+        reason: payload ? 'tampered' : seenVersion > 0 ? 'missing' : 'none',
+        itemCount: items.length,
+        oldestUpdate: dates[0] ?? null,
+        newestUpdate: dates.at(-1) ?? null,
+        previouslySeenVersion: seenVersion,
+      };
     }
 
     return {
-      items: await this.upgradeLegacyItems(items),
+      // Legacy items are re-saved (a write) only once there's a trusted manifest.
+      items: this.pendingBaseline ? items : await this.upgradeLegacyItems(items),
       warnings,
       lastChanged: manifest?.updatedAt ? { at: manifest.updatedAt, by: manifest.updatedBy } : null,
+      baseline: this.pendingBaseline,
     };
   }
 
-  /** The current manifest's view of the vault, for a password change. */
+  /** The baseline waiting for the user's decision, if any. */
+  baseline(): PendingBaseline | null {
+    return this.pendingBaseline;
+  }
+
+  /**
+   * The user accepted the vault as loaded: writes its first trusted manifest
+   * (at the version after the server's) and records the decision in the
+   * revision ledger. Returns the items, with any legacy ones re-saved.
+   */
+  async acceptBaseline(items: VaultItem[]): Promise<VaultItem[]> {
+    const pending = this.pendingBaseline;
+    if (!pending || !this.manifest) throw new Error('There is no baseline to accept.');
+    // The candidate built on load: exactly the items the user was shown.
+    const manifest = nextManifest(this.manifest, {}, CLIENT_NAME);
+    try {
+      await api.putManifest(
+        this.session.token,
+        await encryptManifestPayload(manifest, this.session.vaultKey),
+      );
+    } catch (error) {
+      rethrow(error);
+    }
+    this.pendingBaseline = null;
+    this.manifest = manifest;
+    this.ledger.acceptBaseline({
+      version: manifest.version,
+      itemCount: pending.itemCount,
+      reason: pending.reason,
+      acceptedAt: new Date().toISOString(),
+    });
+    return this.upgradeLegacyItems(items);
+  }
+
+  /** The current manifest's view of the vault, for a password change (which writes a new one). */
   currentManifest(): VaultManifest {
     if (!this.manifest) throw new Error('Load the vault first');
+    if (this.pendingBaseline) throw new BaselineRequiredError();
     return this.manifest;
+  }
+
+  /** The manifest this browser trusts, for the checkpoint; null until there is one. */
+  trustedManifest(): VaultManifest | null {
+    return this.pendingBaseline || !this.manifest || this.manifest.version < 1
+      ? null
+      : this.manifest;
   }
 
   /** After a password change re-encrypted everything, including the manifest. */
@@ -169,6 +255,8 @@ export class VaultSync {
   }
 
   private next(change: { set?: ItemVersion[]; remove?: string[] }): VaultManifest {
+    // Every write moves the manifest on, which would quietly make the
+    // unconfirmed vault the baseline (currentManifest refuses while one is pending).
     return nextManifest(this.currentManifest(), change, CLIENT_NAME);
   }
 
@@ -176,19 +264,6 @@ export class VaultSync {
     this.manifest = manifest;
     this.ledger.record(items);
     this.ledger.recordManifest(manifest.version);
-  }
-
-  private async writeManifestOnly(): Promise<void> {
-    const manifest = this.next({});
-    try {
-      await api.putManifest(
-        this.session.token,
-        await encryptManifestPayload(manifest, this.session.vaultKey),
-      );
-    } catch (error) {
-      rethrow(error);
-    }
-    this.commit(manifest);
   }
 
   async create(data: VaultItemData): Promise<VaultItem> {
