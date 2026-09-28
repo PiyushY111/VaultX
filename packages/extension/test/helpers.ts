@@ -40,10 +40,33 @@ interface StoredItem {
  * Minimal packages/server stand-in, exposed as a fetch implementation.
  * Records every request so tests can assert on what crosses the network.
  */
+/** The fake's authenticator: this code is valid for accounts with two-factor on. */
+export const FAKE_TOTP_CODE = '123456';
+
+interface StoredManifest {
+  version: number;
+  encrypted_data: string;
+  nonce: string;
+}
+
 export function createFakeServer() {
   const requests: { method: string; url: string; body: string }[] = [];
   const users = new Map<string, Record<string, unknown>>();
   const items: StoredItem[] = [];
+  const state = {
+    manifest: null as StoredManifest | null,
+    twoFactor: false,
+    recoveryCodes: [] as string[],
+  };
+  /** Applies a write's manifest if it's the next version, like the real server. */
+  const manifestConflict = (manifest: StoredManifest | undefined) => {
+    const current = state.manifest?.version ?? 0;
+    if (!manifest || manifest.version !== current + 1) {
+      return json(409, { message: 'Your vault was changed elsewhere.', manifest_version: current });
+    }
+    state.manifest = manifest;
+    return null;
+  };
   const tokens = new Set<string>();
   let nextId = 1;
 
@@ -75,6 +98,16 @@ export function createFakeServer() {
       const user = users.get(body.email);
       if (!user || user.auth_hash !== body.auth_hash)
         return json(401, { message: 'Invalid email or auth hash' });
+      if (state.twoFactor) {
+        const index = state.recoveryCodes.indexOf(body.recovery_code);
+        if (!body.totp_code && !body.recovery_code) {
+          return json(401, { message: 'Enter the 6-digit code.', totp_required: true });
+        }
+        if (body.totp_code !== FAKE_TOTP_CODE && index === -1) {
+          return json(401, { message: 'That two-factor code is incorrect.', totp_required: true });
+        }
+        if (index !== -1) state.recoveryCodes.splice(index, 1);
+      }
       const token = `token-${nextId++}`;
       tokens.add(token);
       return json(200, { token, expires_at: now });
@@ -85,7 +118,11 @@ export function createFakeServer() {
     if (path === '/vault-items' && method === 'GET') {
       return json(200, {
         items: items.map((item) => ({ ...item, created_at: now, updated_at: now })),
+        manifest: state.manifest,
       });
+    }
+    if (path === '/vault-manifest' && method === 'PUT') {
+      return manifestConflict(body) ?? new Response(null, { status: 204 });
     }
     if (path === '/logout' && method === 'POST') {
       tokens.delete((headers.authorization ?? '').replace(/^Bearer /, ''));
@@ -94,6 +131,8 @@ export function createFakeServer() {
     if (path === '/vault-items' && method === 'POST') {
       if (body.revision !== 1 || items.some((item) => item.id === body.id))
         return json(409, { message: 'Conflict' });
+      const conflict = manifestConflict(body.manifest);
+      if (conflict) return conflict;
       const item = {
         id: body.id,
         revision: 1,
@@ -108,6 +147,8 @@ export function createFakeServer() {
     if (existing && method === 'PUT') {
       if (body.revision !== existing.revision + 1)
         return json(409, { message: 'Changed elsewhere', current_revision: existing.revision });
+      const conflict = manifestConflict(body.manifest);
+      if (conflict) return conflict;
       Object.assign(existing, {
         revision: body.revision,
         encrypted_data: body.encrypted_data,
@@ -123,7 +164,12 @@ export function createFakeServer() {
     requests,
     items,
     tokens,
+    state,
     expireSessions: () => tokens.clear(),
+    enableTwoFactor(recoveryCodes: string[] = ['RECOV-ERY01']) {
+      state.twoFactor = true;
+      state.recoveryCodes = [...recoveryCodes];
+    },
     /** Registers an account the way the web vault would; returns its vault key for seeding items. */
     async register(email: string, password: string): Promise<Uint8Array> {
       const salt = await generateSalt();

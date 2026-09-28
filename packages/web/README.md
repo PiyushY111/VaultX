@@ -38,9 +38,17 @@ the app and API share an origin and no CORS is needed. In production, serve
 - **Copied passwords** are cleared from the clipboard after 30 seconds.
 - **Security page:** change the master password (rotates the vault key and
   re-encrypts every item), list sessions, and sign out one or all of them.
-- **Rollback and swap detection:** items are bound to their id and revision;
-  anything that fails to decrypt, or is older than a revision this browser
-  has seen, is hidden and reported.
+- **Rollback and swap detection:** items are bound to their id and revision
+  and checked against the vault's encrypted manifest (`src/vault/sync.ts`);
+  anything that fails to decrypt, doesn't match the manifest, or is older
+  than this browser has seen is hidden and reported. The vault shows when it
+  last changed.
+- **Two-factor login** is set up on the Security page (QR code, recovery
+  codes); the login form asks for the code only after the password is right.
+- **Delete account** (Security page) needs the email typed out, the master
+  password, and a two-factor code if that's on.
+- **Emergency kit:** offered after signup and from the Security page, to
+  print or download. It never contains the master password.
 - **Search** runs over decrypted items in memory and never touches the network.
 - **KDF downgrade protection:** the client refuses server-supplied KDF params below
   the crypto package's floor.

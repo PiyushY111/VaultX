@@ -915,3 +915,65 @@ button.link:hover {
     transition: none !important;
   }
 }
+
+/* Emergency kit and recovery codes: a plain sheet, and the only thing printed. */
+.kit-sheet {
+  margin: 0;
+  padding: 1rem 1.2rem;
+  font-family: var(--mono);
+  font-size: var(--step--1);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  color: var(--silk);
+  background: var(--ink);
+  border: 1px dashed rgb(233 226 208 / 22%);
+  border-radius: var(--radius);
+}
+
+.recovery-codes {
+  display: grid;
+  grid-template-columns: repeat(2, max-content);
+  gap: 0.35rem 1.5rem;
+  margin: 0;
+  padding: 1rem 1.2rem;
+  list-style: none;
+  font-family: var(--mono);
+  background: var(--ink);
+  border: 1px dashed rgb(233 226 208 / 22%);
+  border-radius: var(--radius);
+}
+
+.qr {
+  width: 11rem;
+  height: 11rem;
+  padding: 0.6rem;
+  background: #fff;
+  border-radius: var(--radius);
+}
+
+.totp-secret {
+  font-family: var(--mono);
+  overflow-wrap: anywhere;
+}
+
+@media print {
+  body * {
+    visibility: hidden;
+  }
+
+  .kit-sheet,
+  .kit-sheet *,
+  .recovery-codes,
+  .recovery-codes * {
+    visibility: visible;
+    color: #000;
+    background: #fff;
+  }
+
+  .kit-sheet,
+  .recovery-codes {
+    position: absolute;
+    inset: 0 auto auto 0;
+    border: none;
+  }
+}

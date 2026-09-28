@@ -10,7 +10,7 @@ import {
 } from '../shared/messages';
 import { loadLastEmail, loadSettings, saveLastEmail, saveSettings } from './settings';
 import type { KeyValueStore } from './storage';
-import { LockedError, type Vault } from './vault';
+import { LockedError, SecondFactorRequiredError, type Vault } from './vault';
 
 /**
  * Who sent a message, as established by the browser — not by the message.
@@ -96,6 +96,9 @@ export async function handleMessage(
     return { ok: false, error: 'Not allowed' };
   } catch (error) {
     if (error instanceof LockedError) return { ok: false, error: error.message, locked: true };
+    if (error instanceof SecondFactorRequiredError) {
+      return { ok: false, error: error.message, secondFactor: true };
+    }
     return { ok: false, error: error instanceof Error ? error.message : 'Unexpected error' };
   }
 }
@@ -119,6 +122,15 @@ async function handlePopup(request: PopupRequest, deps: RouterDeps): Promise<Res
       await saveLastEmail(settingsStore, String(request.email).trim().toLowerCase());
       await tabs.notifyUnlocked();
       return ok(null);
+    case 'unlockSecondFactor': {
+      await vault.unlockSecondFactor(String(request.code ?? ''), request.recovery === true);
+      const email = await vault.email();
+      if (email) await saveLastEmail(settingsStore, email);
+      await tabs.notifyUnlocked();
+      return ok(null);
+    }
+    case 'getWarnings':
+      return ok(await vault.vaultWarnings());
     case 'lock':
       await vault.lock();
       return ok(null);

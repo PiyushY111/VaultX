@@ -1,19 +1,17 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { ApiError, api } from '../api';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ApiError } from '../api';
 import { AUTO_LOCK_OPTIONS_MINUTES } from '../lib/autoLockSetting';
-import {
-  decryptVaultItems,
-  emptyItem,
-  encryptNewItem,
-  encryptNextRevision,
-  filterItems,
-  isLegacyItem,
-  toVaultItem,
-  type VaultItem,
-  type VaultItemData,
-} from '../vault/items';
+import { emptyItem, filterItems, type VaultItem, type VaultItemData } from '../vault/items';
 import { createRevisionLedger } from '../vault/revisionLedger';
 import type { VaultSession } from '../vault/session';
+import {
+  VaultChangedError,
+  VaultSync,
+  countWarnings,
+  type LoadedVault,
+  type VaultWarnings,
+} from '../vault/sync';
+import { EmergencyKit } from './EmergencyKit';
 import { Emblem, KeyholeIcon } from './Emblem';
 import { ItemForm } from './ItemForm';
 import { ItemRow } from './ItemRow';
@@ -27,68 +25,68 @@ interface Props {
   /** Pass a reason only when the lock wasn't the user's own action. */
   onLock: (reason?: string) => void;
   onLogOut: () => void;
+  onAccountDeleted: () => void;
+  /** Offer the emergency kit right away (after signing up). */
+  justSignedUp?: boolean;
 }
 
 type Editing = { mode: 'new' } | { mode: 'edit'; item: VaultItem } | null;
 
 const SESSION_EXPIRED = 'Your session expired. Enter your master password to continue.';
 
+const NO_WARNINGS: VaultWarnings = {
+  failedIds: [],
+  rolledBackIds: [],
+  missingIds: [],
+  unexpectedIds: [],
+  manifest: null,
+};
+
 const isStaleRevision = (err: unknown) =>
   err instanceof ApiError && err.status === 409 && 'current_revision' in err.details;
+
+const formatTime = (iso: string) =>
+  new Date(iso).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+
+const CLIENT_LABELS: Record<string, string> = { web: 'the web vault', extension: 'the extension' };
 
 /**
  * Holds every decrypted item in component state. When the vault locks, App
  * unmounts this component and all of it is discarded.
  */
-export function VaultView({ session, autoLockMinutes, onChangeAutoLock, onLock, onLogOut }: Props) {
+export function VaultView({
+  session,
+  autoLockMinutes,
+  onChangeAutoLock,
+  onLock,
+  onLogOut,
+  onAccountDeleted,
+  justSignedUp = false,
+}: Props) {
   const [items, setItems] = useState<VaultItem[] | null>(null);
-  const [failedIds, setFailedIds] = useState<string[]>([]);
-  const [rolledBackIds, setRolledBackIds] = useState<string[]>([]);
+  const [warnings, setWarnings] = useState<VaultWarnings>(NO_WARNINGS);
+  const [lastChanged, setLastChanged] = useState<LoadedVault['lastChanged']>(null);
   const [query, setQuery] = useState('');
   const [editing, setEditing] = useState<Editing>(null);
   const [showGenerator, setShowGenerator] = useState(false);
   const [showSecurity, setShowSecurity] = useState(false);
+  const [showKit, setShowKit] = useState(justSignedUp);
   const [error, setError] = useState<string | null>(null);
   const ledger = useMemo(() => createRevisionLedger(session.email), [session.email]);
+  const sync = useRef<VaultSync | null>(null);
+  sync.current ??= new VaultSync(session, ledger);
 
   function handleError(err: unknown) {
     if (err instanceof ApiError && err.status === 401) onLock(SESSION_EXPIRED);
     else setError(err instanceof Error ? err.message : 'Something went wrong');
   }
 
-  /**
-   * Re-saves items from before ciphertexts were bound to their id and
-   * revision, so they get the same rollback and swap protection. Best
-   * effort: anything that fails is retried on the next load.
-   */
-  const upgradeLegacyItems = useCallback(
-    async (loaded: VaultItem[]): Promise<VaultItem[]> => {
-      const upgraded = [...loaded];
-      for (const [index, item] of loaded.entries()) {
-        if (!isLegacyItem(item)) continue;
-        try {
-          const response = await api.updateItem(
-            session.token,
-            await encryptNextRevision(item, item, session.vaultKey),
-          );
-          upgraded[index] = toVaultItem(response, item);
-        } catch (err) {
-          if (err instanceof ApiError && err.status === 401) throw err;
-        }
-      }
-      ledger.record(upgraded);
-      return upgraded;
-    },
-    [session, ledger],
-  );
-
   const load = useCallback(async () => {
-    const { items: encrypted } = await api.listItems(session.token);
-    const result = await decryptVaultItems(encrypted, session.vaultKey, ledger);
-    setFailedIds(result.failedIds);
-    setRolledBackIds(result.rolledBackIds);
-    setItems(await upgradeLegacyItems(result.items));
-  }, [session, ledger, upgradeLegacyItems]);
+    const loaded = await sync.current!.load();
+    setWarnings(loaded.warnings);
+    setLastChanged(loaded.lastChanged);
+    setItems(loaded.items);
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -107,30 +105,20 @@ export function VaultView({ session, autoLockMinutes, onChangeAutoLock, onLock, 
   async function save(data: VaultItemData) {
     try {
       if (editing?.mode === 'edit') {
-        const payload = await encryptNextRevision(editing.item, data, session.vaultKey);
-        const response = await api.updateItem(session.token, payload);
-        ledger.record([response]);
-        setItems((prev) =>
-          (prev ?? []).map((item) =>
-            item.id === response.id ? toVaultItem(response, data) : item,
-          ),
-        );
+        const saved = await sync.current!.update(editing.item, data);
+        setItems((prev) => (prev ?? []).map((item) => (item.id === saved.id ? saved : item)));
       } else {
-        const response = await api.createItem(
-          session.token,
-          await encryptNewItem(data, session.vaultKey),
-        );
-        ledger.record([response]);
-        setItems((prev) => [...(prev ?? []), toVaultItem(response, data)]);
+        const saved = await sync.current!.create(data);
+        setItems((prev) => [...(prev ?? []), saved]);
       }
       setEditing(null);
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) onLock(SESSION_EXPIRED);
-      if (isStaleRevision(err)) {
+      if (isStaleRevision(err) || err instanceof VaultChangedError) {
         // Saved from another device or the extension since this page loaded.
         await load().catch(handleError);
         throw new Error(
-          'This item was changed elsewhere since you opened it. The vault has been reloaded; open the item again to make your change.',
+          'Your vault was changed elsewhere since you opened this. It has been reloaded; open the item again to make your change.',
           { cause: err },
         );
       }
@@ -141,16 +129,19 @@ export function VaultView({ session, autoLockMinutes, onChangeAutoLock, onLock, 
   async function remove(item: VaultItem) {
     if (!window.confirm(`Delete ${item.site}?`)) return;
     try {
-      await api.deleteItem(session.token, item.id);
-      ledger.markDeleted(item.id);
+      await sync.current!.remove(item.id);
       setItems((prev) => (prev ?? []).filter((other) => other.id !== item.id));
     } catch (err) {
-      handleError(err);
+      if (err instanceof VaultChangedError) {
+        await load().catch(handleError);
+        setError('Your vault was changed elsewhere, so it has been reloaded. Try again.');
+      } else {
+        handleError(err);
+      }
     }
   }
 
   const count = items?.length ? `${items.length} ${items.length === 1 ? 'login' : 'logins'}` : null;
-  const unreadable = failedIds.length + rolledBackIds.length;
 
   return (
     <div className="vault">
@@ -205,17 +196,9 @@ export function VaultView({ session, autoLockMinutes, onChangeAutoLock, onLock, 
             {error}
           </p>
         )}
-        {failedIds.length > 0 && (
-          <p className="error" role="alert">
-            {failedIds.length} item(s) could not be decrypted. They may have been corrupted or
-            tampered with on the server.
-          </p>
-        )}
-        {rolledBackIds.length > 0 && (
-          <p className="error" role="alert">
-            {rolledBackIds.length} item(s) are older than a version this browser has already seen,
-            so they’re hidden. The server may have rolled them back.
-          </p>
+        <WarningList warnings={warnings} />
+        {showKit && (
+          <EmergencyKit email={session.email} onDone={() => setShowKit(false)} firstTime />
         )}
 
         {showSecurity ? (
@@ -223,15 +206,22 @@ export function VaultView({ session, autoLockMinutes, onChangeAutoLock, onLock, 
             session={session}
             items={items}
             changeBlockedReason={
-              unreadable > 0
-                ? 'Some items couldn’t be read (see above), so the vault can’t be re-encrypted under a new key without losing them.'
+              countWarnings(warnings) > 0
+                ? 'Some items couldn’t be verified (see above), so the vault can’t be re-encrypted under a new key without losing them.'
                 : null
             }
-            onPasswordChanged={(updated) => {
+            currentManifest={() => sync.current!.currentManifest()}
+            onPasswordChanged={(updated, manifest) => {
+              sync.current!.replaceManifest(manifest);
               ledger.record(updated);
               setItems(updated);
             }}
+            onShowEmergencyKit={() => {
+              setShowSecurity(false);
+              setShowKit(true);
+            }}
             onSignedOutEverywhere={onLogOut}
+            onAccountDeleted={onAccountDeleted}
             onSessionExpired={() => onLock(SESSION_EXPIRED)}
             onClose={() => setShowSecurity(false)}
           />
@@ -249,6 +239,13 @@ export function VaultView({ session, autoLockMinutes, onChangeAutoLock, onLock, 
               <h2>Your vault</h2>
               {count && <span className="vault-count">{count}</span>}
             </div>
+            {lastChanged && (
+              <p className="hint" data-testid="last-changed">
+                Last changed {formatTime(lastChanged.at)} from{' '}
+                {CLIENT_LABELS[lastChanged.by] ?? 'another app'}. If you changed it more recently
+                than that, the server may be showing you an old copy.
+              </p>
+            )}
             <div className="vault-tools">
               <input
                 type="search"
@@ -306,5 +303,55 @@ export function VaultView({ session, autoLockMinutes, onChangeAutoLock, onLock, 
         )}
       </main>
     </div>
+  );
+}
+
+/** Everything the vault's integrity checks found, one alert per kind. */
+function WarningList({ warnings }: { warnings: VaultWarnings }) {
+  const messages: string[] = [];
+  const { failedIds, rolledBackIds, missingIds, unexpectedIds, manifest } = warnings;
+  if (failedIds.length) {
+    messages.push(
+      `${failedIds.length} item(s) could not be decrypted. They may have been corrupted or tampered with on the server.`,
+    );
+  }
+  if (rolledBackIds.length) {
+    messages.push(
+      `${rolledBackIds.length} item(s) are older than a version this browser has already seen, so they’re hidden. The server may have rolled them back.`,
+    );
+  }
+  if (missingIds.length) {
+    messages.push(
+      `${missingIds.length} item(s) in your vault weren’t returned by the server. It may be hiding them.`,
+    );
+  }
+  if (unexpectedIds.length) {
+    messages.push(
+      `${unexpectedIds.length} item(s) returned by the server aren’t part of your vault (for example, deleted items brought back), so they’re hidden.`,
+    );
+  }
+  if (manifest === 'tampered') {
+    messages.push(
+      'Your vault’s item list failed its integrity check. It may have been tampered with.',
+    );
+  }
+  if (manifest === 'stale') {
+    messages.push(
+      'The server returned an older copy of your vault than this browser has already seen. It may have been rolled back.',
+    );
+  }
+  if (manifest === 'missing') {
+    messages.push(
+      'Your vault’s item list is missing from the server, though this browser has seen one before.',
+    );
+  }
+  return (
+    <>
+      {messages.map((message) => (
+        <p key={message} className="error" role="alert">
+          {message}
+        </p>
+      ))}
+    </>
   );
 }

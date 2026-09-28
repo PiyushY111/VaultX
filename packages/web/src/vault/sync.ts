@@ -1,0 +1,259 @@
+import {
+  DecryptionError,
+  checkAgainstManifest,
+  decryptManifest,
+  encryptManifest,
+  nextManifest,
+  type ItemVersion,
+  type VaultManifest,
+} from '@password-manager/crypto';
+import { ApiError, api, type ManifestPayload } from '../api';
+import { fromBase64, toBase64 } from '../lib/base64';
+import {
+  decryptVaultItems,
+  encryptNewItem,
+  encryptNextRevision,
+  isLegacyItem,
+  toVaultItem,
+  type VaultItem,
+  type VaultItemData,
+} from './items';
+import type { RevisionLedger } from './revisionLedger';
+import type { VaultSession } from './session';
+
+/**
+ * Loads and writes the vault, keeping it consistent with its manifest: the
+ * encrypted list of every item id and revision that each write moves to the
+ * next version (see @password-manager/crypto's manifest.ts).
+ *
+ * On load, anything that doesn't match is hidden and reported: items the
+ * manifest doesn't list, items at another revision, items it lists that the
+ * server didn't return, and a manifest older than one this browser has seen.
+ */
+
+export const CLIENT_NAME = 'web';
+
+export interface VaultWarnings {
+  /** Failed authentication: tampered, corrupted, or moved to another id or revision. */
+  failedIds: string[];
+  /** Older than a revision this browser has seen, or not the revision the manifest lists. */
+  rolledBackIds: string[];
+  /** Listed in the manifest, but the server didn't return them. */
+  missingIds: string[];
+  /** Returned by the server but not in the manifest (e.g. a deleted item brought back). */
+  unexpectedIds: string[];
+  /** Something is wrong with the manifest itself. */
+  manifest: 'tampered' | 'stale' | 'missing' | null;
+}
+
+export interface LoadedVault {
+  items: VaultItem[];
+  warnings: VaultWarnings;
+  /** When the vault last changed and from which client, per the manifest. */
+  lastChanged: { at: string; by: string } | null;
+}
+
+/** The vault changed elsewhere since it was loaded (the manifest moved on). */
+export class VaultChangedError extends Error {
+  constructor(options?: ErrorOptions) {
+    super('Your vault was changed elsewhere since it was loaded.', options);
+    this.name = 'VaultChangedError';
+  }
+}
+
+export const countWarnings = (w: VaultWarnings) =>
+  w.failedIds.length +
+  w.rolledBackIds.length +
+  w.missingIds.length +
+  w.unexpectedIds.length +
+  (w.manifest ? 1 : 0);
+
+async function encryptManifestPayload(
+  manifest: VaultManifest,
+  vaultKey: Uint8Array,
+): Promise<ManifestPayload> {
+  const { ciphertext, nonce } = await encryptManifest(manifest, vaultKey);
+  return {
+    version: manifest.version,
+    encrypted_data: toBase64(ciphertext),
+    nonce: toBase64(nonce),
+  };
+}
+
+/** Re-throws a manifest conflict (409 with manifest_version) as {@link VaultChangedError}. */
+function rethrow(error: unknown): never {
+  if (error instanceof ApiError && error.status === 409 && 'manifest_version' in error.details) {
+    throw new VaultChangedError({ cause: error });
+  }
+  throw error;
+}
+
+export class VaultSync {
+  /** The manifest the next write builds on. Null only before the first load. */
+  private manifest: VaultManifest | null = null;
+
+  constructor(
+    private readonly session: VaultSession,
+    private readonly ledger: RevisionLedger,
+  ) {}
+
+  async load(): Promise<LoadedVault> {
+    const { items: responses, manifest: payload } = await api.listItems(this.session.token);
+    const decrypted = await decryptVaultItems(responses, this.session.vaultKey, this.ledger);
+    const warnings: VaultWarnings = {
+      failedIds: decrypted.failedIds,
+      rolledBackIds: decrypted.rolledBackIds,
+      missingIds: [],
+      unexpectedIds: [],
+      manifest: null,
+    };
+
+    let manifest: VaultManifest | null = null;
+    if (payload) {
+      try {
+        manifest = await decryptManifest(
+          fromBase64(payload.encrypted_data),
+          fromBase64(payload.nonce),
+          this.session.vaultKey,
+          payload.version,
+        );
+      } catch (error) {
+        if (!(error instanceof DecryptionError)) throw error;
+        warnings.manifest = 'tampered';
+      }
+    }
+    const seenVersion = this.ledger.manifestVersion();
+    if (manifest && manifest.version < seenVersion) warnings.manifest = 'stale';
+    if (!payload && seenVersion > 0) warnings.manifest = 'missing';
+
+    let items = decrypted.items;
+    if (manifest) {
+      const check = checkAgainstManifest(manifest, responses);
+      warnings.missingIds = check.missing;
+      warnings.unexpectedIds = check.unexpected;
+      const hidden = new Set([...check.unexpected, ...check.mismatched]);
+      warnings.rolledBackIds = [...new Set([...warnings.rolledBackIds, ...check.mismatched])];
+      items = items.filter((item) => !hidden.has(item.id));
+      this.manifest = manifest;
+      this.ledger.recordManifest(manifest.version);
+    } else {
+      // No usable manifest: start one from what this browser could verify, at
+      // the version after the server's, so the next write repairs it. A
+      // vault that never had one gets its first right away.
+      this.manifest = {
+        version: payload?.version ?? 0,
+        items: Object.fromEntries(items.map((item) => [item.id, item.revision])),
+        updatedAt: '',
+        updatedBy: '',
+      };
+      if (!payload) await this.writeManifestOnly();
+    }
+
+    return {
+      items: await this.upgradeLegacyItems(items),
+      warnings,
+      lastChanged: manifest?.updatedAt ? { at: manifest.updatedAt, by: manifest.updatedBy } : null,
+    };
+  }
+
+  /** The current manifest's view of the vault, for a password change. */
+  currentManifest(): VaultManifest {
+    if (!this.manifest) throw new Error('Load the vault first');
+    return this.manifest;
+  }
+
+  /** After a password change re-encrypted everything, including the manifest. */
+  replaceManifest(manifest: VaultManifest): void {
+    this.manifest = manifest;
+    this.ledger.recordManifest(manifest.version);
+  }
+
+  private next(change: { set?: ItemVersion[]; remove?: string[] }): VaultManifest {
+    return nextManifest(this.currentManifest(), change, CLIENT_NAME);
+  }
+
+  private commit(manifest: VaultManifest, items: ItemVersion[] = []): void {
+    this.manifest = manifest;
+    this.ledger.record(items);
+    this.ledger.recordManifest(manifest.version);
+  }
+
+  private async writeManifestOnly(): Promise<void> {
+    const manifest = this.next({});
+    try {
+      await api.putManifest(
+        this.session.token,
+        await encryptManifestPayload(manifest, this.session.vaultKey),
+      );
+    } catch (error) {
+      rethrow(error);
+    }
+    this.commit(manifest);
+  }
+
+  async create(data: VaultItemData): Promise<VaultItem> {
+    const payload = await encryptNewItem(data, this.session.vaultKey);
+    const manifest = this.next({ set: [{ id: payload.id, revision: 1 }] });
+    try {
+      const response = await api.createItem(
+        this.session.token,
+        payload,
+        await encryptManifestPayload(manifest, this.session.vaultKey),
+      );
+      this.commit(manifest, [response]);
+      return toVaultItem(response, data);
+    } catch (error) {
+      rethrow(error);
+    }
+  }
+
+  async update(item: VaultItem, data: VaultItemData): Promise<VaultItem> {
+    const payload = await encryptNextRevision(item, data, this.session.vaultKey);
+    const manifest = this.next({ set: [{ id: item.id, revision: payload.revision }] });
+    try {
+      const response = await api.updateItem(
+        this.session.token,
+        payload,
+        await encryptManifestPayload(manifest, this.session.vaultKey),
+      );
+      this.commit(manifest, [response]);
+      return toVaultItem(response, data);
+    } catch (error) {
+      rethrow(error);
+    }
+  }
+
+  async remove(id: string): Promise<void> {
+    const manifest = this.next({ remove: [id] });
+    try {
+      await api.deleteItem(
+        this.session.token,
+        id,
+        await encryptManifestPayload(manifest, this.session.vaultKey),
+      );
+    } catch (error) {
+      rethrow(error);
+    }
+    this.commit(manifest);
+    this.ledger.markDeleted(id);
+  }
+
+  /**
+   * Re-saves items from before ciphertexts were bound to their id and
+   * revision. Best effort: anything that fails is retried on the next load.
+   */
+  private async upgradeLegacyItems(items: VaultItem[]): Promise<VaultItem[]> {
+    const upgraded = [...items];
+    for (const [index, item] of items.entries()) {
+      if (!isLegacyItem(item)) continue;
+      try {
+        upgraded[index] = await this.update(item, item);
+      } catch (error) {
+        if (error instanceof ApiError && error.status === 401) throw error;
+      }
+    }
+    return upgraded;
+  }
+}
+
+export { encryptManifestPayload };

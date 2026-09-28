@@ -20,8 +20,15 @@ export class ApiError extends Error {
  * User-facing message for a failed /login: attempts left before the
  * per-account lockout, or how long to wait once locked.
  */
+/** The password was right, and the account needs a two-factor code too. */
+export const needsSecondFactor = (error: unknown): boolean =>
+  error instanceof ApiError && error.details.totp_required === true;
+
+export type SecondFactor = { totp_code: string } | { recovery_code: string };
+
 export function describeLoginFailure(error: ApiError): string {
   const { attempts_remaining: remaining, retry_after_seconds: retryAfter } = error.details;
+  if (needsSecondFactor(error)) return error.message;
   if (error.status === 429) {
     if (typeof retryAfter !== 'number') return error.message; // Per-IP rate limit.
     const minutes = Math.max(1, Math.ceil(retryAfter / 60));
@@ -51,6 +58,11 @@ export interface ItemResponse extends EncryptedItemPayload {
   revision: number;
   created_at: string;
   updated_at: string;
+}
+
+/** The encrypted vault manifest at one version (see @password-manager/crypto). */
+export interface ManifestPayload extends EncryptedItemPayload {
+  version: number;
 }
 
 export interface VaultKeyResponse {
@@ -94,17 +106,25 @@ export function createApi(baseUrl: string, fetchImpl: typeof fetch) {
       request<{ kdf_salt: string; kdf_params: KdfParams }>('POST', '/prelogin', {
         body: { email },
       }),
-    login: (email: string, authHash: string) =>
+    login: (email: string, authHash: string, factor?: SecondFactor) =>
       request<{ token: string; expires_at: string }>('POST', '/login', {
-        body: { email, auth_hash: authHash, client: 'extension' },
+        body: { email, auth_hash: authHash, client: 'extension', ...factor },
       }),
     logout: (token: string) => request<void>('POST', '/logout', { token }),
     getVaultKey: (token: string) => request<VaultKeyResponse>('GET', '/vault-key', { token }),
     listItems: (token: string) =>
-      request<{ items: ItemResponse[] }>('GET', '/vault-items', { token }),
-    createItem: (token: string, body: ItemRevisionPayload) =>
-      request<ItemResponse>('POST', '/vault-items', { token, body }),
-    updateItem: (token: string, { id, ...body }: ItemRevisionPayload) =>
-      request<ItemResponse>('PUT', `/vault-items/${encodeURIComponent(id)}`, { token, body }),
+      request<{ items: ItemResponse[]; manifest: ManifestPayload | null }>('GET', '/vault-items', {
+        token,
+      }),
+    // Every write carries the vault's next manifest; the server applies both or neither.
+    createItem: (token: string, item: ItemRevisionPayload, manifest: ManifestPayload) =>
+      request<ItemResponse>('POST', '/vault-items', { token, body: { ...item, manifest } }),
+    updateItem: (token: string, { id, ...item }: ItemRevisionPayload, manifest: ManifestPayload) =>
+      request<ItemResponse>('PUT', `/vault-items/${encodeURIComponent(id)}`, {
+        token,
+        body: { ...item, manifest },
+      }),
+    putManifest: (token: string, manifest: ManifestPayload) =>
+      request<void>('PUT', '/vault-manifest', { token, body: manifest }),
   };
 }

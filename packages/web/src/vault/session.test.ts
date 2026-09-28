@@ -6,10 +6,20 @@ import {
 } from '@password-manager/crypto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { api } from '../api';
-import { installFakeServer, type FakeServer } from '../../test/fakeServer';
+import { FAKE_TOTP_CODE, installFakeServer, type FakeServer } from '../../test/fakeServer';
 import { fromBase64, toBase64 } from '../lib/base64';
-import { decryptVaultItems, encryptNewItem, toVaultItem, type VaultItem } from './items';
-import { WrongPasswordError, changeMasterPassword, logIn, signUp } from './session';
+import { decryptVaultItems, encryptNewItem, type VaultItem } from './items';
+import { createRevisionLedger } from './revisionLedger';
+import {
+  SecondFactorRequiredError,
+  WrongPasswordError,
+  changeMasterPassword,
+  logIn,
+  proveCurrentPassword,
+  signUp,
+  type VaultSession,
+} from './session';
+import { VaultSync } from './sync';
 
 const EMAIL = 'Alice@Example.com';
 const PASSWORD = 'MASTER-correct-horse-battery-staple-41';
@@ -37,10 +47,18 @@ const hex = (bytes: Uint8Array) =>
 const wireTraffic = () =>
   server.requests.map((r) => `${r.method} ${r.url}\n${JSON.stringify(r.headers)}\n${r.body}`);
 
+/** Adds an item the way the vault view does (with the next manifest). */
+async function addItem(session: VaultSession, data = ITEM) {
+  const sync = new VaultSync(session, createRevisionLedger(session.email, null));
+  await sync.load();
+  const item = await sync.create(data);
+  return { sync, item };
+}
+
 describe('what crosses the network', () => {
   it('signup → add item → login → decrypt never sends the password, derived keys, vault key or plaintext', async () => {
     const session = await signUp(EMAIL, PASSWORD);
-    await api.createItem(session.token, await encryptNewItem(ITEM, session.vaultKey));
+    await addItem(session);
 
     const again = await logIn(EMAIL, PASSWORD);
     const { items } = await api.listItems(again.token);
@@ -160,21 +178,25 @@ describe('changeMasterPassword', () => {
 
   async function signUpWithItem() {
     const session = await signUp(EMAIL, PASSWORD);
-    const created = await api.createItem(
-      session.token,
-      await encryptNewItem(ITEM, session.vaultKey),
-    );
-    return { session, items: [toVaultItem(created, ITEM)] as VaultItem[] };
+    const { sync, item } = await addItem(session);
+    return { session, sync, items: [item] as VaultItem[] };
   }
 
   it('re-encrypts every item under a new vault key that only the new password unwraps', async () => {
-    const { session, items } = await signUpWithItem();
+    const { session, sync, items } = await signUpWithItem();
     const oldVaultKey = session.vaultKey;
     const oldKeyCopy = oldVaultKey.slice();
     const requestsBefore = server.requests.length;
 
-    const updated = await changeMasterPassword(session, PASSWORD, NEW_PASSWORD, items);
-    expect(updated).toMatchObject([{ id: items[0]!.id, revision: 2, ...ITEM }]);
+    const changed = await changeMasterPassword(
+      session,
+      PASSWORD,
+      NEW_PASSWORD,
+      items,
+      sync.currentManifest(),
+    );
+    expect(changed.items).toMatchObject([{ id: items[0]!.id, revision: 2, ...ITEM }]);
+    expect(changed.manifest).toMatchObject({ items: { [items[0]!.id]: 2 } });
     expect(oldVaultKey.every((byte) => byte === 0)).toBe(true);
     expect(session.vaultKey).not.toEqual(oldKeyCopy);
 
@@ -194,13 +216,28 @@ describe('changeMasterPassword', () => {
     expect(decrypted.items).toMatchObject([ITEM]);
     // Anything still encrypted under the old key would fail to open now.
     expect((await decryptVaultItems(stored, oldKeyCopy)).failedIds).toHaveLength(1);
+    // The manifest was re-encrypted too: a fresh load finds nothing wrong.
+    const reloaded = await new VaultSync(again, createRevisionLedger(EMAIL, null)).load();
+    expect(reloaded.warnings).toEqual({
+      failedIds: [],
+      rolledBackIds: [],
+      missingIds: [],
+      unexpectedIds: [],
+      manifest: null,
+    });
   });
 
   it('refuses a wrong current password locally, without sending anything', async () => {
-    const { session, items } = await signUpWithItem();
+    const { session, sync, items } = await signUpWithItem();
     const requestsBefore = server.requests.length;
     await expect(
-      changeMasterPassword(session, 'wrong-password-123', NEW_PASSWORD, items),
+      changeMasterPassword(
+        session,
+        'wrong-password-123',
+        NEW_PASSWORD,
+        items,
+        sync.currentManifest(),
+      ),
     ).rejects.toThrow(WrongPasswordError);
     expect(
       server.requests.slice(requestsBefore).map((request) => `${request.method} ${request.url}`),
@@ -210,13 +247,65 @@ describe('changeMasterPassword', () => {
   });
 
   it('changes nothing if the item list is out of date', async () => {
-    const { session, items } = await signUpWithItem();
+    const { session, sync, items } = await signUpWithItem();
     const keyBefore = session.vaultKey.slice();
-    await expect(changeMasterPassword(session, PASSWORD, NEW_PASSWORD, [])).rejects.toThrow(
-      /vault changed/,
-    );
+    await expect(
+      changeMasterPassword(session, PASSWORD, NEW_PASSWORD, [], sync.currentManifest()),
+    ).rejects.toThrow(/vault changed/);
     expect(session.vaultKey).toEqual(keyBefore);
     expect((await logIn(EMAIL, PASSWORD)).vaultKey).toEqual(keyBefore);
     expect(items).toHaveLength(1);
+  });
+});
+
+describe('two-factor login', () => {
+  async function enableTwoFactor() {
+    const session = await signUp(EMAIL, PASSWORD);
+    await api.setupTotp(session.token);
+    const { recovery_codes } = await api.enableTotp(session.token, {
+      current_auth_hash: await proveCurrentPassword(session, PASSWORD),
+      totp_code: FAKE_TOTP_CODE,
+    });
+    return recovery_codes;
+  }
+
+  it('asks for a code after the password, without deriving keys again', async () => {
+    await enableTwoFactor();
+    const pending = await logIn(EMAIL, PASSWORD).catch((error: unknown) => error);
+    expect(pending).toBeInstanceOf(SecondFactorRequiredError);
+    const preloginsBefore = server.requests.filter((r) => r.url === '/api/prelogin').length;
+
+    await expect(
+      (pending as SecondFactorRequiredError).complete({ totp_code: '000000' }),
+    ).rejects.toThrow(/incorrect/);
+    const session = await (pending as SecondFactorRequiredError).complete({
+      totp_code: FAKE_TOTP_CODE,
+    });
+    expect(session.email).toBe('alice@example.com');
+    // Same keys, no second prelogin/Argon2id run; the code went only to /login.
+    expect(server.requests.filter((r) => r.url === '/api/prelogin')).toHaveLength(preloginsBefore);
+    // Done: it can't be used again.
+    await expect(
+      (pending as SecondFactorRequiredError).complete({ totp_code: FAKE_TOTP_CODE }),
+    ).rejects.toThrow(/expired/);
+  });
+
+  it('accepts a recovery code instead', async () => {
+    const [code] = await enableTwoFactor();
+    const pending = (await logIn(EMAIL, PASSWORD).catch(
+      (e: unknown) => e,
+    )) as SecondFactorRequiredError;
+    expect((await pending.complete({ recovery_code: code! })).email).toBe('alice@example.com');
+  });
+});
+
+describe('proveCurrentPassword', () => {
+  it('refuses a wrong password before sending anything', async () => {
+    const session = await signUp(EMAIL, PASSWORD);
+    const before = server.requests.length;
+    await expect(proveCurrentPassword(session, 'wrong-password-123')).rejects.toThrow(
+      WrongPasswordError,
+    );
+    expect(server.requests.slice(before).map((r) => r.url)).toEqual(['/api/vault-key']);
   });
 });

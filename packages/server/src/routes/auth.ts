@@ -12,7 +12,7 @@ import {
   NONCE_BYTES,
   type KdfParams,
 } from '../limits.js';
-import { clearLoginFailures, reserveLoginAttempt } from '../login-throttle.js';
+import { clearLoginFailures, refundLoginAttempt, reserveLoginAttempt } from '../login-throttle.js';
 import {
   loginBodySchema,
   loginResponseSchema,
@@ -28,6 +28,7 @@ import {
   generateSessionToken,
   hashAuthHash,
 } from '../tokens.js';
+import { SECOND_FACTOR_REQUIRED, consumeSecondFactor, type SecondFactor } from '../verify-user.js';
 
 interface SignupBody {
   email: string;
@@ -38,7 +39,7 @@ interface SignupBody {
   kdf_params: KdfParams;
 }
 
-interface LoginBody {
+interface LoginBody extends SecondFactor {
   email: string;
   auth_hash: string;
   client?: 'web' | 'extension';
@@ -132,8 +133,8 @@ export function registerAuthRoutes(app: FastifyInstance, pool: pg.Pool, config: 
         );
       }
 
-      const { rows } = await pool.query<{ id: string; auth_hash: Buffer }>(
-        'SELECT id, auth_hash FROM users WHERE email = $1',
+      const { rows } = await pool.query<{ id: string; auth_hash: Buffer; totp_enabled: boolean }>(
+        'SELECT id, auth_hash, totp_secret IS NOT NULL AS totp_enabled FROM users WHERE email = $1',
         [email],
       );
       const user = rows[0];
@@ -148,6 +149,23 @@ export function registerAuthRoutes(app: FastifyInstance, pool: pg.Pool, config: 
             : 'Invalid email or auth hash. This account is now temporarily locked after too many failed attempts.',
           { attempts_remaining: remaining },
         );
+      }
+
+      // Only now, with the password proven, is two-factor mentioned at all,
+      // so it reveals nothing about accounts to someone without the password.
+      if (user.totp_enabled) {
+        if (!request.body.totp_code && !request.body.recovery_code) {
+          // Asking for the code isn't a failed attempt.
+          await refundLoginAttempt(pool, email);
+          throw unauthorized(SECOND_FACTOR_REQUIRED, { totp_required: true });
+        }
+        if (!(await consumeSecondFactor(pool, user.id, request.body))) {
+          const remaining = attempt.attemptsRemaining;
+          throw unauthorized(
+            `That two-factor code is incorrect or was already used. ${remaining} attempt${remaining === 1 ? '' : 's'} left before this account is temporarily locked.`,
+            { totp_required: true, attempts_remaining: remaining },
+          );
+        }
       }
       await clearLoginFailures(pool, email);
 

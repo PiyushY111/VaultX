@@ -1,15 +1,20 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import {
   MIN_KDF_PARAMS,
+  decryptManifest,
   deriveKeys,
   deriveMasterKey,
   encryptItem,
+  encryptManifest,
   encryptVaultKey,
   generateSalt,
   generateVaultKey,
+  nextManifest,
   type EncryptedPayload,
   type ItemBinding,
+  type ItemVersion,
   type KdfParams,
+  type VaultManifest,
 } from '@password-manager/crypto';
 import type { FastifyInstance } from 'fastify';
 import pg from 'pg';
@@ -17,6 +22,7 @@ import { expect, inject } from 'vitest';
 import { buildApp } from '../src/app.js';
 import type { Config } from '../src/config.js';
 import { migrate } from '../src/migrate.js';
+import { hotp, timeStep } from '../src/totp.js';
 
 export const b64 = (bytes: Uint8Array): string => Buffer.from(bytes).toString('base64');
 export const unb64 = (value: string): Uint8Array => new Uint8Array(Buffer.from(value, 'base64'));
@@ -174,17 +180,95 @@ export async function encryptedItemPayload(
   return { encrypted_data: b64(ciphertext), nonce: b64(nonce) };
 }
 
-/** A PUT body saving `plaintext` as the item's next revision. */
+// ---------------------------------------------------------------------------
+// The vault manifest, computed the way a real client does
+
+export interface ManifestBody {
+  version: number;
+  encrypted_data: string;
+  nonce: string;
+}
+
+/** A well-formed manifest body for requests that must fail before it's looked at. */
+export const PLACEHOLDER_MANIFEST: ManifestBody = {
+  version: 1,
+  encrypted_data: b64(new Uint8Array(32)),
+  nonce: b64(new Uint8Array(24).fill(1)),
+};
+
+/** The account's current manifest, decrypted with the client's vault key (null if none yet). */
+export async function currentManifest(
+  app: FastifyInstance,
+  token: string,
+  vaultKey: Uint8Array,
+): Promise<VaultManifest | null> {
+  const response = await app.inject({ method: 'GET', url: '/vault-items', headers: bearer(token) });
+  expect(response.statusCode, response.body).toBe(200);
+  const { manifest } = response.json<{ manifest: ManifestBody | null }>();
+  if (!manifest) return null;
+  return decryptManifest(
+    unb64(manifest.encrypted_data),
+    unb64(manifest.nonce),
+    vaultKey,
+    manifest.version,
+  );
+}
+
+export async function encryptManifestBody(
+  manifest: VaultManifest,
+  vaultKey: Uint8Array,
+): Promise<ManifestBody> {
+  const { ciphertext, nonce } = await encryptManifest(manifest, vaultKey);
+  return { version: manifest.version, encrypted_data: b64(ciphertext), nonce: b64(nonce) };
+}
+
+/** The next manifest after `change`, encrypted: what a client sends with a write. */
+export async function manifestFor(
+  app: FastifyInstance,
+  token: string,
+  vaultKey: Uint8Array,
+  change: { set?: ItemVersion[]; remove?: string[] },
+): Promise<ManifestBody> {
+  const current = await currentManifest(app, token, vaultKey);
+  return encryptManifestBody(nextManifest(current, change, 'test'), vaultKey);
+}
+
+/**
+ * A PUT body saving `plaintext` as the item's next revision. With `session`,
+ * it carries the real next manifest; without, a placeholder (for requests
+ * expected to fail on the item itself).
+ */
 export async function updatePayload(
   plaintext: string,
   vaultKey: Uint8Array,
   item: { id: string; revision: number },
+  session?: { app: FastifyInstance; token: string },
 ) {
   const revision = item.revision + 1;
   return {
     revision,
     ...(await encryptedItemPayload(plaintext, vaultKey, { itemId: item.id, revision })),
+    manifest: session
+      ? await manifestFor(session.app, session.token, vaultKey, {
+          set: [{ id: item.id, revision }],
+        })
+      : PLACEHOLDER_MANIFEST,
   };
+}
+
+/** Deletes an item the way a client does, with the next manifest. */
+export async function deleteItem(
+  app: FastifyInstance,
+  token: string,
+  vaultKey: Uint8Array,
+  id: string,
+) {
+  return app.inject({
+    method: 'DELETE',
+    url: `/vault-items/${id}`,
+    headers: bearer(token),
+    payload: { manifest: await manifestFor(app, token, vaultKey, { remove: [id] }) },
+  });
 }
 
 export async function createItem(
@@ -202,10 +286,28 @@ export async function createItem(
       id,
       revision: 1,
       ...(await encryptedItemPayload(plaintext, vaultKey, { itemId: id, revision: 1 })),
+      manifest: await manifestFor(app, token, vaultKey, { set: [{ id, revision: 1 }] }),
     },
   });
   expect(response.statusCode, response.body).toBe(201);
   return response.json<ItemResponse>();
+}
+
+/** The current TOTP code for a base32 secret, as an authenticator app would show it. */
+export function totpCode(base32Secret: string, offsetSteps = 0): string {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+  let bits = 0;
+  let value = 0;
+  const bytes: number[] = [];
+  for (const char of base32Secret) {
+    value = (value << 5) | alphabet.indexOf(char);
+    bits += 5;
+    if (bits >= 8) {
+      bytes.push((value >>> (bits - 8)) & 255);
+      bits -= 8;
+    }
+  }
+  return hotp(Buffer.from(bytes), timeStep(Date.now()) + offsetSteps);
 }
 
 export const bindingOf = (item: { id: string; revision: number }): ItemBinding => ({

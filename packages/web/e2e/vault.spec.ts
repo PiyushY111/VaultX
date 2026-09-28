@@ -1,3 +1,4 @@
+import { createHmac } from 'node:crypto';
 import { expect, test, type Page } from '@playwright/test';
 
 const ITEM = {
@@ -169,4 +170,67 @@ test('clears a copied password from the clipboard after 30 seconds', async ({ pa
   await expect.poll(readClipboard).toBe(ITEM.password);
   await page.clock.fastForward('00:31');
   await expect.poll(readClipboard).toBe('');
+});
+
+/** RFC 6238 TOTP for a base32 secret, as an authenticator app computes it. */
+function totp(base32: string, now = Date.now()): string {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+  let bits = '';
+  for (const char of base32.replace(/\s/g, '')) {
+    bits += alphabet.indexOf(char).toString(2).padStart(5, '0');
+  }
+  const key = Buffer.from(bits.match(/.{8}/g)!.map((byte) => parseInt(byte, 2)));
+  const counter = Buffer.alloc(8);
+  counter.writeBigUInt64BE(BigInt(Math.floor(now / 30_000)));
+  const digest = createHmac('sha1', key).update(counter).digest();
+  const offset = digest[19]! & 0x0f;
+  return String((digest.readUInt32BE(offset) & 0x7fffffff) % 1_000_000).padStart(6, '0');
+}
+
+test('two-factor login and account deletion, end to end', async ({ page }) => {
+  const account = uniqueAccount();
+  await signUp(page, account);
+  await expect(page.getByRole('region', { name: 'Emergency kit' })).toContainText(account.email);
+  await page.getByRole('button', { name: 'I’ve saved it' }).click();
+  await addItem(page);
+
+  // Turn on two-factor with a code computed from the key shown on screen.
+  await page.getByRole('button', { name: 'Security' }).click();
+  const section = page.getByRole('region', { name: 'Two-factor login' });
+  await section.getByRole('button', { name: 'Set up two-factor login' }).click();
+  const setup = section.getByRole('form', { name: 'Set up two-factor login' });
+  await expect(setup.getByRole('img', { name: /QR code/ })).toBeVisible();
+  const secret = (await setup.locator('.totp-secret').textContent())!;
+  await setup.getByLabel('Code from the app').fill(totp(secret));
+  await setup.getByLabel('Master password').fill(account.password);
+  await setup.getByRole('button', { name: 'Turn on two-factor login' }).click();
+  const codes = section.getByRole('region', { name: 'Recovery codes' });
+  await expect(codes.getByRole('listitem')).toHaveCount(10);
+  const recoveryCode = (await codes.getByRole('listitem').first().textContent())!;
+  await codes.getByRole('button', { name: 'I’ve saved them' }).click();
+  await expect(section.getByRole('status')).toContainText('Two-factor login is on');
+
+  // Unlocking now needs a code (the next time step: each code works once).
+  await page.getByRole('button', { name: 'Lock now' }).click();
+  await page.getByLabel('Master password').fill(account.password);
+  await page.getByRole('button', { name: 'Unlock' }).click();
+  const second = page.getByRole('form', { name: 'Two-factor code' });
+  await second.getByLabel('Authentication code').fill(totp(secret, Date.now() + 30_000));
+  await second.getByRole('button', { name: 'Verify' }).click();
+  await expect(page.getByRole('listitem', { name: ITEM.site })).toBeVisible();
+  await expect(page.getByTestId('last-changed')).toContainText('the web vault');
+
+  // Delete the account (password + a recovery code, since the next TOTP code
+  // isn't valid yet), and it's gone.
+  await page.getByRole('button', { name: 'Security' }).click();
+  const remove = page.getByRole('form', { name: 'Delete account' });
+  await remove.getByLabel('Type your email to confirm').fill(account.email);
+  await remove.getByLabel('Master password').fill(account.password);
+  await remove.getByLabel('Code from your app, or a recovery code').fill(recoveryCode);
+  await remove.getByRole('button', { name: 'Delete account permanently' }).click();
+  await expect(page.getByRole('status')).toContainText('were deleted');
+  await page.getByLabel('Email').fill(account.email);
+  await page.getByLabel('Master password').fill(account.password);
+  await page.getByRole('button', { name: 'Log in' }).click();
+  await expect(page.getByRole('alert')).toContainText('Incorrect email or master password');
 });

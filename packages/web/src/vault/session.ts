@@ -5,11 +5,21 @@ import {
   encryptVaultKey,
   generateSalt,
   generateVaultKey,
+  nextManifest,
+  type VaultManifest,
 } from '@password-manager/crypto';
-import { ApiError, api, describeLoginFailure, type ItemResponse } from '../api';
+import {
+  ApiError,
+  api,
+  describeLoginFailure,
+  needsSecondFactor,
+  type ItemResponse,
+  type SecondFactor,
+} from '../api';
 import { fromBase64, toBase64 } from '../lib/base64';
 import { encryptNextRevision, toVaultItem, type VaultItem } from './items';
 import { derivePasswordKeys, type PasswordKeys } from './kdf';
+import { CLIENT_NAME, encryptManifestPayload } from './sync';
 
 /**
  * An unlocked vault. Held in memory only — never written to localStorage,
@@ -79,38 +89,86 @@ export async function signUp(emailInput: string, password: string): Promise<Vaul
 }
 
 /**
+ * Thrown by {@link logIn} when the password is right but the account has
+ * two-factor login on. It holds the keys derived from the password, so the
+ * code can be sent without running Argon2id again; call `complete` with the
+ * code, or `cancel` to wipe them. They're wiped after five minutes anyway.
+ */
+export class SecondFactorRequiredError extends Error {
+  private keys: PasswordKeys | null;
+  private readonly timer: ReturnType<typeof setTimeout>;
+
+  constructor(
+    private readonly email: string,
+    keys: PasswordKeys,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'SecondFactorRequiredError';
+    this.keys = keys;
+    this.timer = setTimeout(() => this.cancel(), 5 * 60_000);
+  }
+
+  /** Sends the code. Throws (keeping the keys, to try another code) if it's refused. */
+  async complete(factor: SecondFactor): Promise<VaultSession> {
+    if (!this.keys) throw new Error('This sign-in expired. Enter your master password again.');
+    const session = await finishLogIn(this.email, this.keys, factor);
+    this.cancel();
+    return session;
+  }
+
+  cancel(): void {
+    clearTimeout(this.timer);
+    if (this.keys) wipe(this.keys.stretchedMasterKey, this.keys.authHash);
+    this.keys = null;
+  }
+}
+
+async function finishLogIn(
+  email: string,
+  { stretchedMasterKey, authHash }: PasswordKeys,
+  factor?: SecondFactor,
+): Promise<VaultSession> {
+  let token: string;
+  try {
+    ({ token } = await api.login(email, toBase64(authHash), factor));
+  } catch (error) {
+    if (error instanceof ApiError && (error.status === 401 || error.status === 429)) {
+      throw new Error(describeLoginFailure(error), { cause: error });
+    }
+    throw error;
+  }
+  const wrapped = await api.getVaultKey(token);
+  const vaultKey = await decryptVaultKey(
+    fromBase64(wrapped.encrypted_vault_key),
+    fromBase64(wrapped.vault_key_nonce),
+    stretchedMasterKey,
+  );
+  return { email, token, vaultKey };
+}
+
+/**
  * Logs in: fetches the KDF salt/params, re-derives keys locally, proves
  * knowledge of the password with the authHash, then unwraps the vault key.
+ * Throws {@link SecondFactorRequiredError} if a two-factor code is needed.
  */
 export async function logIn(emailInput: string, password: string): Promise<VaultSession> {
   const email = normalizeEmail(emailInput);
   const { kdf_salt, kdf_params } = await api.prelogin(email);
   // derivePasswordKeys rejects params below the crypto package's floor, so a
   // malicious server can't downgrade the KDF.
-  const { stretchedMasterKey, authHash } = await derivePasswordKeys(
-    password,
-    fromBase64(kdf_salt),
-    kdf_params,
-  );
+  const keys = await derivePasswordKeys(password, fromBase64(kdf_salt), kdf_params);
+  let handedOff = false;
   try {
-    let token: string;
-    try {
-      ({ token } = await api.login(email, toBase64(authHash)));
-    } catch (error) {
-      if (error instanceof ApiError && (error.status === 401 || error.status === 429)) {
-        throw new Error(describeLoginFailure(error), { cause: error });
-      }
-      throw error;
+    return await finishLogIn(email, keys);
+  } catch (error) {
+    if (needsSecondFactor(error instanceof Error ? (error.cause ?? error) : error)) {
+      handedOff = true;
+      throw new SecondFactorRequiredError(email, keys, (error as Error).message);
     }
-    const wrapped = await api.getVaultKey(token);
-    const vaultKey = await decryptVaultKey(
-      fromBase64(wrapped.encrypted_vault_key),
-      fromBase64(wrapped.vault_key_nonce),
-      stretchedMasterKey,
-    );
-    return { email, token, vaultKey };
+    throw error;
   } finally {
-    wipe(stretchedMasterKey, authHash);
+    if (!handedOff) wipe(keys.stretchedMasterKey, keys.authHash);
   }
 }
 
@@ -122,6 +180,38 @@ export class WrongPasswordError extends Error {
 }
 
 /**
+ * Re-derives the auth hash from the current master password, for account
+ * changes that ask for it, after checking locally that the password is right
+ * (it must unwrap the vault key), so a typo doesn't use up a login attempt.
+ */
+export async function proveCurrentPassword(
+  session: VaultSession,
+  password: string,
+): Promise<string> {
+  const wrapped = await api.getVaultKey(session.token);
+  const { stretchedMasterKey, authHash } = await derivePasswordKeys(
+    password,
+    fromBase64(wrapped.kdf_salt),
+    wrapped.kdf_params,
+  );
+  try {
+    wipe(
+      await decryptVaultKey(
+        fromBase64(wrapped.encrypted_vault_key),
+        fromBase64(wrapped.vault_key_nonce),
+        stretchedMasterKey,
+      ),
+    );
+    return toBase64(authHash);
+  } catch (error) {
+    if (error instanceof DecryptionError) throw new WrongPasswordError();
+    throw error;
+  } finally {
+    wipe(stretchedMasterKey, authHash);
+  }
+}
+
+/**
  * Changes the master password and rotates the vault key.
  *
  * A new random vault key replaces the old one and every item is re-encrypted
@@ -129,15 +219,17 @@ export class WrongPasswordError extends Error {
  * nothing saved from now on. The server applies it all in one transaction
  * and ends every other session.
  *
- * `items` must be the whole vault. On success the session's vault key is
- * swapped for the new one in place, and the re-encrypted items are returned.
+ * `items` must be the whole vault, and `manifest` its current manifest. On
+ * success the session's vault key is swapped for the new one in place, and
+ * the re-encrypted items and the new manifest are returned.
  */
 export async function changeMasterPassword(
   session: VaultSession,
   currentPassword: string,
   newPassword: string,
   items: readonly VaultItem[],
-): Promise<VaultItem[]> {
+  manifest: VaultManifest,
+): Promise<{ items: VaultItem[]; manifest: VaultManifest }> {
   if (newPassword.length < MIN_MASTER_PASSWORD_LENGTH) {
     throw new Error(`Master password must be at least ${MIN_MASTER_PASSWORD_LENGTH} characters`);
   }
@@ -172,6 +264,11 @@ export async function changeMasterPassword(
     const payloads = await Promise.all(
       items.map((item) => encryptNextRevision(item, item, vaultKey)),
     );
+    const newManifest = nextManifest(
+      manifest,
+      { set: payloads.map(({ id, revision }) => ({ id, revision })) },
+      CLIENT_NAME,
+    );
     let response: { items: ItemResponse[] };
     try {
       response = await api.changePassword(session.token, {
@@ -182,6 +279,7 @@ export async function changeMasterPassword(
         encrypted_vault_key: toBase64(wrappedNew.ciphertext),
         vault_key_nonce: toBase64(wrappedNew.nonce),
         items: payloads,
+        manifest: await encryptManifestPayload(newManifest, vaultKey),
       });
     } catch (error) {
       if (error instanceof ApiError && error.status === 403) throw new WrongPasswordError();
@@ -192,7 +290,7 @@ export async function changeMasterPassword(
     const updated = response.items.map((saved) => toVaultItem(saved, byId.get(saved.id)!));
     wipe(session.vaultKey);
     session.vaultKey = vaultKey;
-    return updated;
+    return { items: updated, manifest: newManifest };
   } catch (error) {
     wipe(vaultKey);
     throw error;

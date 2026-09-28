@@ -36,6 +36,12 @@ item JSON {"v":1, site, username, password, notes}
   │    AAD "password-manager:v2:item" ‖ 0x00 ‖ item id ‖ 0x00 ‖ revision)
   ▼
 item ciphertext (+16-byte tag) + 24-byte nonce     ─▶ vault_items.encrypted_data, vault_items.nonce
+
+vault manifest JSON {"v":1, version, items: {id: revision}, updated_at, updated_by}
+  │  XChaCha20-Poly1305(key = vault key, fresh random nonce,
+  │    AAD "password-manager:v1:manifest" ‖ 0x00 ‖ version)
+  ▼
+manifest ciphertext + 24-byte nonce                ─▶ users.encrypted_manifest, users.manifest_nonce
 ```
 
 ### Step by step
@@ -149,14 +155,55 @@ them ("sign out everywhere").
 2. Generate a new salt, derive new keys, and generate a **new vault key**.
 3. Re-encrypt every item under the new vault key at its next revision.
 4. `POST /account/password {current_auth_hash, auth_hash, kdf_salt,
-kdf_params, encrypted_vault_key, vault_key_nonce, items}`.
+kdf_params, encrypted_vault_key, vault_key_nonce, items, manifest}`, with the
+   manifest at its next version, encrypted under the new vault key.
 
 The server verifies the current auth hash (wrong ones count toward the
 per-account login lockout), checks the item list is exactly the vault's
 items at their next revisions, then in one transaction updates every item,
 the user row, and deletes every other session. Anything else gets a 409 and
 changes nothing. The client then swaps in the new vault key. It refuses to
-start if any item failed to decrypt, since those couldn't be re-encrypted.
+start if any item failed a check (decryption or the manifest), since those
+couldn't be re-encrypted.
+
+### Two-factor login (TOTP)
+
+RFC 6238: HMAC-SHA1, 6 digits, 30-second steps, ±1 step of drift, which
+every authenticator app supports.
+
+1. `POST /account/totp/setup` stores a new 20-byte secret as _pending_ and
+   returns it (base32) with an `otpauth://` URI, which the web vault shows
+   as a QR code.
+2. `POST /account/totp/enable {current_auth_hash, totp_code}` checks the
+   password and a code for the pending secret, turns it on, and returns ten
+   one-time recovery codes (`XXXXX-XXXXX`, ~50 bits each; only SHA-256
+   hashes are stored).
+3. `POST /login` then also needs `totp_code` or `recovery_code`. The server
+   answers `401 {totp_required: true}` only once the auth hash matched, and
+   gives back the attempt that reply used; wrong codes count. The last
+   accepted time step is stored, so a code works once, and a recovery code
+   is deleted when used.
+
+The web vault keeps the password-derived keys in memory while it asks for the
+code (wiped after five minutes or on cancel), so Argon2id doesn't run twice;
+the extension keeps them in the background worker's memory the same way.
+Turning two-factor off, replacing recovery codes, and deleting the account
+all take the master password (re-derived, and checked locally first) and a
+code.
+
+### Account deletion
+
+`DELETE /account {current_auth_hash, totp_code?, recovery_code?}` deletes the
+user row; items, sessions and recovery codes go with it (`ON DELETE
+CASCADE`). The web vault asks for the email to be typed as confirmation, and
+forgets its revision ledger for the account afterwards.
+
+### Emergency kit
+
+Offered right after signup and from the Security page: a text sheet to
+print or download with the email, server address, and a blank line for the
+master password to be written by hand. It never contains the password or
+any key.
 
 ### Login throttling (server)
 
@@ -204,6 +251,30 @@ unbound AAD `password-manager:v1:item`. Clients can still decrypt them, but
 never write revision 0; the web vault re-saves them as revision 1 when it
 loads them.
 
+### Vault manifest
+
+The ledger only helps a device that has seen the vault before. The
+**manifest** works on any device: an encrypted list of every item id and its
+current revision, plus when and from which client the vault last changed
+(`packages/crypto/src/manifest.ts`). Its version number is in its AAD.
+
+- Every item write sends the next manifest along (`manifest: {version,
+encrypted_data, nonce}`), at exactly the stored version + 1. The server
+  can't read it; it stores it in the same transaction as the item change,
+  or rejects both (409 with `manifest_version`). A client that gets that
+  409 reloads the vault (the extension retries once by itself).
+- `GET /vault-items` returns `{items, manifest}` from one database snapshot.
+- On load, clients decrypt it and compare. Items it doesn't list (added, or
+  deleted and brought back) and items at another revision (rolled back) are
+  hidden; items it lists that weren't returned are reported as missing. A
+  manifest that fails to decrypt, is older than one this device has seen,
+  or has vanished is reported too.
+- A vault with no manifest yet (created before migration 004) gets one from
+  the first client that loads it (`PUT /vault-manifest`, trust on first use).
+
+It can't prove to a device with no history that it's the _latest_ manifest,
+so the web vault shows "last changed … from …" for a person to judge.
+
 ## Data model
 
 ### Server (Postgres, `packages/server/migrations/`)
@@ -213,16 +284,21 @@ numbered SQL migrations, applied on startup under an advisory lock.
 
 **users**
 
-| Column              | Type         | Contents                                                        |
-| ------------------- | ------------ | --------------------------------------------------------------- |
-| id                  | uuid PK      |                                                                 |
-| email               | text, unique | Lower-cased.                                                    |
-| kdf_salt            | bytea(16)    | Argon2id salt.                                                  |
-| kdf_params          | jsonb        | `{memoryCost, iterations, parallelism}`.                        |
-| auth_hash           | bytea(32)    | SHA-256 of the client's auth hash (never the auth hash itself). |
-| encrypted_vault_key | bytea(48)    | Vault key + Poly1305 tag.                                       |
-| vault_key_nonce     | bytea(24)    |                                                                 |
-| created_at          | timestamptz  |                                                                 |
+| Column                             | Type                | Contents                                                        |
+| ---------------------------------- | ------------------- | --------------------------------------------------------------- |
+| id                                 | uuid PK             |                                                                 |
+| email                              | text, unique        | Lower-cased.                                                    |
+| kdf_salt                           | bytea(16)           | Argon2id salt.                                                  |
+| kdf_params                         | jsonb               | `{memoryCost, iterations, parallelism}`.                        |
+| auth_hash                          | bytea(32)           | SHA-256 of the client's auth hash (never the auth hash itself). |
+| encrypted_vault_key                | bytea(48)           | Vault key + Poly1305 tag.                                       |
+| vault_key_nonce                    | bytea(24)           |                                                                 |
+| created_at                         | timestamptz         |                                                                 |
+| manifest_version                   | integer             | 0 until the first manifest is written.                          |
+| encrypted_manifest, manifest_nonce | bytea, nullable     | The client's encrypted vault manifest.                          |
+| totp_secret                        | bytea(20), nullable | Two-factor secret, once turned on.                              |
+| totp_pending_secret                | bytea(20), nullable | During setup, until confirmed with a code.                      |
+| totp_last_step                     | bigint              | Last accepted TOTP time step (so codes work once).              |
 
 **vault_items**
 
@@ -246,6 +322,13 @@ numbered SQL migrations, applied on startup under an advisory lock.
 | created_at, last_used_at | timestamptz              |                                                    |
 | client                   | text, nullable           | `web` or `extension`, as the client said at login. |
 | user_agent               | text (≤256), nullable    | As sent at login, for the session list.            |
+
+**totp_recovery_codes**
+
+| Column    | Type                     | Contents                                     |
+| --------- | ------------------------ | -------------------------------------------- |
+| user_id   | uuid FK → users, cascade |                                              |
+| code_hash | bytea(32)                | SHA-256 of a recovery code (deleted on use). |
 
 **login_failures** (per-account throttling)
 

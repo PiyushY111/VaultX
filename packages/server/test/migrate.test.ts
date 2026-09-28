@@ -22,6 +22,7 @@ describe('migrations', () => {
       '001_initial_schema.sql',
       '002_login_failures.sql',
       '003_item_revisions_and_sessions.sql',
+      '004_manifest_and_two_factor.sql',
     ]);
     expect(await migrate(ctx.pool)).toEqual([]);
   });
@@ -45,7 +46,10 @@ describe('migrations', () => {
          SELECT id, $2, now() + interval '1 hour' FROM u`,
         [Buffer.alloc(16), Buffer.alloc(32), Buffer.alloc(48), Buffer.alloc(24)],
       );
-      expect(await migrate(fresh.pool)).toEqual(['003_item_revisions_and_sessions.sql']);
+      expect(await migrate(fresh.pool)).toEqual([
+        '003_item_revisions_and_sessions.sql',
+        '004_manifest_and_two_factor.sql',
+      ]);
       const { rows: items } = await fresh.pool.query('SELECT revision FROM vault_items');
       expect(items).toEqual([{ revision: 0 }]);
       const { rows: sessions } = await fresh.pool.query(
@@ -97,6 +101,12 @@ describe('migrations', () => {
       'users.encrypted_vault_key:bytea',
       'users.vault_key_nonce:bytea',
       'users.created_at:timestamp with time zone',
+      'users.manifest_version:integer',
+      'users.encrypted_manifest:bytea',
+      'users.manifest_nonce:bytea',
+      'users.totp_secret:bytea',
+      'users.totp_pending_secret:bytea',
+      'users.totp_last_step:bigint',
       'vault_items.id:uuid',
       'vault_items.user_id:uuid',
       'vault_items.encrypted_data:bytea',

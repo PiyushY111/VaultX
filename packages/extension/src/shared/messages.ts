@@ -51,6 +51,9 @@ export type PopupRequest =
   | { type: 'fillTab'; tabId: number; itemId: string }
   | { type: 'saveSettings'; settings: Settings }
   | { type: 'addItem'; item: NewItem }
+  /** The second step of unlocking, when the account has two-factor login on. */
+  | { type: 'unlockSecondFactor'; code: string; recovery: boolean }
+  | { type: 'getWarnings' }
   /** Sent after the popup copies a password, so the background can clear it later. */
   | { type: 'scheduleClipboardClear' };
 
@@ -80,7 +83,28 @@ export interface VaultUnlockedMessage {
   type: 'vaultUnlocked';
 }
 
-export type Response<T> = { ok: true; data: T } | { ok: false; error: string; locked?: boolean };
+export type Response<T> =
+  | { ok: true; data: T }
+  | {
+      ok: false;
+      error: string;
+      locked?: boolean;
+      /** The password was right; send a two-factor code with unlockSecondFactor. */
+      secondFactor?: boolean;
+    };
+
+/** What the vault's integrity checks found on the last load. All zero for an honest server. */
+export interface VaultWarnings {
+  /** Failed to decrypt: tampered, corrupted, or moved to another id or revision. */
+  failed: number;
+  /** Older than a revision seen before, or not the revision the manifest lists. */
+  rolledBack: number;
+  /** Listed in the manifest but not returned by the server. */
+  missing: number;
+  /** Returned by the server but not in the manifest (e.g. deleted items brought back). */
+  unexpected: number;
+  manifest: 'tampered' | 'stale' | 'missing' | null;
+}
 
 export const POPUP_REQUEST_TYPES = new Set<PopupRequest['type']>([
   'getState',
@@ -91,6 +115,8 @@ export const POPUP_REQUEST_TYPES = new Set<PopupRequest['type']>([
   'fillTab',
   'saveSettings',
   'addItem',
+  'unlockSecondFactor',
+  'getWarnings',
   'scheduleClipboardClear',
 ]);
 

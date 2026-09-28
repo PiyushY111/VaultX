@@ -1,3 +1,4 @@
+import { createHmac } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -7,12 +8,15 @@ import { fileURLToPath } from 'node:url';
 import {
   DEFAULT_KDF_PARAMS,
   decryptItem,
+  decryptManifest,
   deriveKeys,
   deriveMasterKey,
   encryptItem,
+  encryptManifest,
   encryptVaultKey,
   generateSalt,
   generateVaultKey,
+  nextManifest,
 } from '@password-manager/crypto';
 import { test as base, chromium, expect, type BrowserContext, type Page } from '@playwright/test';
 
@@ -111,14 +115,39 @@ async function addItem(
   data: { site: string; username: string; password: string },
 ) {
   const id = crypto.randomUUID();
+  const token = await apiToken(account);
   const { ciphertext, nonce } = await encryptItem(
     JSON.stringify({ v: 1, ...data, notes: '' }),
     account.vaultKey,
     { itemId: id, revision: 1 },
   );
+  // Like a real client, the write carries the vault's next manifest.
+  const { manifest: stored } = await api<{
+    manifest: { version: number; encrypted_data: string; nonce: string } | null;
+  }>('/vault-items', { token });
+  const current = stored
+    ? await decryptManifest(
+        unb64(stored.encrypted_data),
+        unb64(stored.nonce),
+        account.vaultKey,
+        stored.version,
+      )
+    : null;
+  const next = nextManifest(current, { set: [{ id, revision: 1 }] }, 'e2e');
+  const encrypted = await encryptManifest(next, account.vaultKey);
   await api('/vault-items', {
-    token: await apiToken(account),
-    body: { id, revision: 1, encrypted_data: b64(ciphertext), nonce: b64(nonce) },
+    token,
+    body: {
+      id,
+      revision: 1,
+      encrypted_data: b64(ciphertext),
+      nonce: b64(nonce),
+      manifest: {
+        version: next.version,
+        encrypted_data: b64(encrypted.ciphertext),
+        nonce: b64(encrypted.nonce),
+      },
+    },
   });
 }
 
@@ -428,6 +457,57 @@ test('adds a login from the popup, encrypted before it is sent', async ({ userDa
     for (const secret of [generated, 'popup-user', 'POPUP-NOTES']) {
       expect(apiTraffic.join('\n')).not.toContain(secret);
     }
+  } finally {
+    await context.close();
+  }
+});
+
+/** RFC 6238 TOTP for a base32 secret, as an authenticator app computes it. */
+function totp(base32: string, now = Date.now()): string {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+  let bits = '';
+  for (const char of base32) bits += alphabet.indexOf(char).toString(2).padStart(5, '0');
+  const key = Buffer.from(bits.match(/.{8}/g)!.map((byte) => parseInt(byte, 2)));
+  const counter = Buffer.alloc(8);
+  counter.writeBigUInt64BE(BigInt(Math.floor(now / 30_000)));
+  const digest = createHmac('sha1', key).update(counter).digest();
+  const offset = digest[19]! & 0x0f;
+  return String((digest.readUInt32BE(offset) & 0x7fffffff) % 1_000_000).padStart(6, '0');
+}
+
+test('unlocks with a two-factor code in the popup', async ({ userDataDir }) => {
+  const account = await createAccount();
+  await addItem(account, { site: '2fa.example.com', username: 'u', password: 'E2E-2FA-PW' });
+  const token = await apiToken(account);
+  const { secret } = await api<{ secret: string }>('/account/totp/setup', {
+    method: 'POST',
+    token,
+  });
+  await api('/account/totp/enable', {
+    token,
+    body: { current_auth_hash: account.authHash, totp_code: totp(secret) },
+  });
+
+  const { context, extensionId } = await launch(userDataDir);
+  try {
+    const popup = await openPopup(context, extensionId);
+    await popup.getByRole('button', { name: 'Settings' }).click();
+    await popup.getByLabel('Server URL').fill(API_URL);
+    await popup.getByRole('button', { name: 'Save' }).click();
+    await popup.getByLabel('Email').fill(account.email);
+    await popup.getByLabel('Master password').fill(account.password);
+    await popup.getByRole('button', { name: 'Unlock' }).click();
+
+    const form = popup.getByRole('form', { name: 'Two-factor code' });
+    await form.getByLabel('Authentication code').fill('000000');
+    await form.getByRole('button', { name: 'Verify' }).click();
+    await expect(form.getByRole('alert')).toContainText('incorrect');
+    // The code used to turn it on can't be reused; the next step's can.
+    await form.getByLabel('Authentication code').fill(totp(secret, Date.now() + 30_000));
+    await form.getByRole('button', { name: 'Verify' }).click();
+    await expect(popup.getByText(`Unlocked as ${account.email}`)).toBeVisible();
+    await expect(popup.getByRole('listitem', { name: '2fa.example.com' })).toBeVisible();
+    await expect(popup.getByRole('alert', { name: 'Vault warnings' })).toBeHidden();
   } finally {
     await context.close();
   }

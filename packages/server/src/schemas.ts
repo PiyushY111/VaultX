@@ -5,6 +5,7 @@ import {
   KDF_LIMITS,
   KDF_SALT_BYTES,
   MAX_ITEM_CIPHERTEXT_BYTES,
+  MAX_MANIFEST_CIPHERTEXT_BYTES,
   NONCE_BYTES,
 } from './limits.js';
 
@@ -72,6 +73,12 @@ export const preloginBodySchema = {
 
 export const SESSION_CLIENTS = ['web', 'extension'] as const;
 
+/** A second factor: a 6-digit TOTP code, or one of the account's recovery codes. */
+export const secondFactorProperties = {
+  totp_code: { type: 'string', pattern: '^[0-9]{6}$' },
+  recovery_code: { type: 'string', minLength: 1, maxLength: 32 },
+} as const;
+
 export const loginBodySchema = {
   type: 'object',
   additionalProperties: false,
@@ -81,6 +88,8 @@ export const loginBodySchema = {
     auth_hash: base64Schema(AUTH_HASH_BYTES),
     /** Optional label shown in the session list. */
     client: { type: 'string', enum: SESSION_CLIENTS },
+    /** Required once the password checks out, if the account has two-factor on. */
+    ...secondFactorProperties,
   },
 } as const;
 
@@ -97,6 +106,18 @@ const clientItemIdSchema = {
 /** Postgres integer range; a vault item would need billions of saves to reach it. */
 const revisionSchema = { type: 'integer', minimum: 1, maximum: 2_147_483_647 } as const;
 
+/** The next version of the client's encrypted vault manifest. */
+export const manifestBodySchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['version', 'encrypted_data', 'nonce'],
+  properties: {
+    version: revisionSchema,
+    encrypted_data: base64Schema(MAX_MANIFEST_CIPHERTEXT_BYTES),
+    nonce: base64Schema(NONCE_BYTES),
+  },
+} as const;
+
 const ciphertextProperties = {
   encrypted_data: base64Schema(MAX_ITEM_CIPHERTEXT_BYTES),
   nonce: base64Schema(NONCE_BYTES),
@@ -105,19 +126,27 @@ const ciphertextProperties = {
 export const createItemBodySchema = {
   type: 'object',
   additionalProperties: false,
-  required: ['id', 'revision', 'encrypted_data', 'nonce'],
+  required: ['id', 'revision', 'encrypted_data', 'nonce', 'manifest'],
   properties: {
     id: clientItemIdSchema,
     revision: { type: 'integer', const: 1 },
     ...ciphertextProperties,
+    manifest: manifestBodySchema,
   },
 } as const;
 
 export const updateItemBodySchema = {
   type: 'object',
   additionalProperties: false,
-  required: ['revision', 'encrypted_data', 'nonce'],
-  properties: { revision: revisionSchema, ...ciphertextProperties },
+  required: ['revision', 'encrypted_data', 'nonce', 'manifest'],
+  properties: { revision: revisionSchema, ...ciphertextProperties, manifest: manifestBodySchema },
+} as const;
+
+export const deleteItemBodySchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['manifest'],
+  properties: { manifest: manifestBodySchema },
 } as const;
 
 export const itemIdParamsSchema = {
@@ -140,6 +169,7 @@ export const changePasswordBodySchema = {
     'encrypted_vault_key',
     'vault_key_nonce',
     'items',
+    'manifest',
   ],
   properties: {
     current_auth_hash: base64Schema(AUTH_HASH_BYTES),
@@ -157,6 +187,7 @@ export const changePasswordBodySchema = {
         properties: { id: clientItemIdSchema, revision: revisionSchema, ...ciphertextProperties },
       },
     },
+    manifest: manifestBodySchema,
   },
 } as const;
 
@@ -212,10 +243,30 @@ export const vaultKeyResponseSchema = {
   },
 } as const;
 
+const manifestResponse = {
+  type: ['object', 'null'],
+  required: ['version', 'encrypted_data', 'nonce'],
+  properties: {
+    version: { type: 'integer' },
+    encrypted_data: { type: 'string' },
+    nonce: { type: 'string' },
+  },
+} as const;
+
 export const itemListResponseSchema = {
   type: 'object',
   required: ['items'],
   properties: { items: { type: 'array', items: itemResponseSchema } },
+} as const;
+
+/** The vault as stored: every item plus the manifest (null until a client writes one). */
+export const vaultResponseSchema = {
+  type: 'object',
+  required: ['items', 'manifest'],
+  properties: {
+    items: { type: 'array', items: itemResponseSchema },
+    manifest: manifestResponse,
+  },
 } as const;
 
 export const sessionListResponseSchema = {
@@ -247,4 +298,45 @@ export const sessionListResponseSchema = {
       },
     },
   },
+} as const;
+
+/** Re-authentication for sensitive account changes. */
+export const reauthBodySchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['current_auth_hash'],
+  properties: { current_auth_hash: base64Schema(AUTH_HASH_BYTES), ...secondFactorProperties },
+} as const;
+
+export const enableTotpBodySchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['current_auth_hash', 'totp_code'],
+  properties: {
+    current_auth_hash: base64Schema(AUTH_HASH_BYTES),
+    totp_code: secondFactorProperties.totp_code,
+  },
+} as const;
+
+export const accountResponseSchema = {
+  type: 'object',
+  required: ['email', 'created_at', 'totp_enabled', 'recovery_codes_remaining'],
+  properties: {
+    email: { type: 'string' },
+    created_at: { type: 'string', format: 'date-time' },
+    totp_enabled: { type: 'boolean' },
+    recovery_codes_remaining: { type: 'integer' },
+  },
+} as const;
+
+export const totpSetupResponseSchema = {
+  type: 'object',
+  required: ['secret', 'otpauth_uri'],
+  properties: { secret: { type: 'string' }, otpauth_uri: { type: 'string' } },
+} as const;
+
+export const recoveryCodesResponseSchema = {
+  type: 'object',
+  required: ['recovery_codes'],
+  properties: { recovery_codes: { type: 'array', items: { type: 'string' } } },
 } as const;

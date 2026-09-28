@@ -1,9 +1,9 @@
 import type { FastifyInstance, onRequestHookHandler } from 'fastify';
 import type pg from 'pg';
 import type { Config } from '../config.js';
-import { isUniqueViolation } from '../db.js';
+import { isUniqueViolation, withTransaction } from '../db.js';
 import { decodeBytes } from '../encoding.js';
-import { conflict, forbidden, notFound, tooManyRequests } from '../http-errors.js';
+import { conflict, forbidden, notFound } from '../http-errors.js';
 import {
   AUTH_HASH_BYTES,
   CHANGE_PASSWORD_BODY_LIMIT_BYTES,
@@ -12,14 +12,28 @@ import {
   NONCE_BYTES,
   type KdfParams,
 } from '../limits.js';
-import { clearLoginFailures, reserveLoginAttempt } from '../login-throttle.js';
+import { advanceManifest, type ManifestBody } from '../manifest.js';
 import {
+  accountResponseSchema,
   changePasswordBodySchema,
+  enableTotpBodySchema,
   itemListResponseSchema,
+  reauthBodySchema,
+  recoveryCodesResponseSchema,
   sessionIdParamsSchema,
   sessionListResponseSchema,
+  totpSetupResponseSchema,
 } from '../schemas.js';
-import { authHashMatches, hashAuthHash } from '../tokens.js';
+import { hashAuthHash } from '../tokens.js';
+import {
+  base32Encode,
+  generateRecoveryCodes,
+  generateTotpSecret,
+  hashRecoveryCode,
+  otpauthUri,
+  verifyTotp,
+} from '../totp.js';
+import { verifyCurrentUser, type SecondFactor } from '../verify-user.js';
 import {
   ITEM_COLUMNS,
   NONCE_REUSE_MESSAGE,
@@ -36,6 +50,11 @@ interface ChangePasswordBody {
   encrypted_vault_key: string;
   vault_key_nonce: string;
   items: { id: string; revision: number; encrypted_data: string; nonce: string }[];
+  manifest: ManifestBody;
+}
+
+interface ReauthBody extends SecondFactor {
+  current_auth_hash: string;
 }
 
 interface SessionRow {
@@ -50,7 +69,24 @@ interface SessionRow {
 const VAULT_CHANGED_MESSAGE =
   'Your vault changed while it was being re-encrypted. Reload the vault and try again.';
 
-/** Session management and master-password change. Every route requires a session. */
+const decodeAuthHash = (value: string) =>
+  decodeBytes(value, 'current_auth_hash', { exact: AUTH_HASH_BYTES });
+
+async function replaceRecoveryCodes(db: pg.PoolClient, userId: string): Promise<string[]> {
+  const codes = generateRecoveryCodes();
+  await db.query('DELETE FROM totp_recovery_codes WHERE user_id = $1', [userId]);
+  await db.query(
+    'INSERT INTO totp_recovery_codes (user_id, code_hash) SELECT $1, unnest($2::bytea[])',
+    [userId, codes.map(hashRecoveryCode)],
+  );
+  return codes;
+}
+
+/**
+ * Sessions, master-password change, two-factor setup and account deletion.
+ * Every route requires a session; the ones that change how you log in, or
+ * delete data, also re-check the master password (and two-factor code).
+ */
 export function registerAccountRoutes(
   app: FastifyInstance,
   pool: pg.Pool,
@@ -132,101 +168,231 @@ export function registerAccountRoutes(
       const items = body.items.map((item) => ({ ...item, ...decodeCiphertext(item) }));
       const { memoryCost, iterations, parallelism } = body.kdf_params;
 
-      const { rows: users } = await pool.query<{ email: string }>(
-        'SELECT email FROM users WHERE id = $1',
-        [request.userId],
+      // Wrong current passwords count toward the login lockout. Two-factor
+      // isn't asked again: this session already passed it.
+      await verifyCurrentUser(
+        pool,
+        config,
+        request.userId,
+        { current_auth_hash: currentAuthHash },
+        { requireSecondFactor: false },
       );
-      const email = users[0]?.email;
-      if (!email) throw notFound();
 
-      // A stolen session token must not become an unthrottled password oracle,
-      // so wrong current passwords count against the same per-account budget
-      // as failed logins.
-      const attempt = await reserveLoginAttempt(pool, email, config.loginThrottle);
-      if (!attempt.allowed) {
-        throw tooManyRequests('Too many incorrect attempts. Try again later.', {
-          retry_after_seconds: attempt.retryAfterSeconds,
-        });
-      }
-
-      const client = await pool.connect();
       let updated: ItemRow[];
-      let passwordVerified = false;
       try {
-        await client.query('BEGIN');
-        const { rows } = await client.query<{ auth_hash: Buffer }>(
-          'SELECT auth_hash FROM users WHERE id = $1 FOR UPDATE',
-          [request.userId],
-        );
-        if (!authHashMatches(currentAuthHash, rows[0]!.auth_hash)) {
-          throw forbidden('Current master password is incorrect.', {
-            attempts_remaining: attempt.attemptsRemaining,
-          });
-        }
-        passwordVerified = true;
+        updated = await withTransaction(pool, async (db) => {
+          const { rows: existing } = await db.query<{ id: string; revision: number }>(
+            'SELECT id, revision FROM vault_items WHERE user_id = $1 FOR UPDATE',
+            [request.userId],
+          );
+          const currentRevisions = new Map(existing.map((row) => [row.id, row.revision]));
+          const complete =
+            items.length === currentRevisions.size &&
+            new Set(items.map((item) => item.id)).size === items.length &&
+            items.every((item) => currentRevisions.get(item.id) === item.revision - 1);
+          if (!complete) throw conflict(VAULT_CHANGED_MESSAGE);
 
-        const { rows: existing } = await client.query<{ id: string; revision: number }>(
-          'SELECT id, revision FROM vault_items WHERE user_id = $1 FOR UPDATE',
-          [request.userId],
-        );
-        const currentRevisions = new Map(existing.map((row) => [row.id, row.revision]));
-        const complete =
-          items.length === currentRevisions.size &&
-          new Set(items.map((item) => item.id)).size === items.length &&
-          items.every((item) => currentRevisions.get(item.id) === item.revision - 1);
-        if (!complete) throw conflict(VAULT_CHANGED_MESSAGE);
-
-        ({ rows: updated } = await client.query<ItemRow>(
-          `UPDATE vault_items AS v
-           SET encrypted_data = n.encrypted_data, nonce = n.nonce, revision = n.revision,
-               updated_at = now()
-           FROM unnest($2::uuid[], $3::integer[], $4::bytea[], $5::bytea[])
-             AS n (id, revision, encrypted_data, nonce)
-           WHERE v.id = n.id AND v.user_id = $1
-           RETURNING ${ITEM_COLUMNS.split(', ')
-             .map((column) => `v.${column}`)
-             .join(', ')}`,
-          [
+          const { rows } = await db.query<ItemRow>(
+            `UPDATE vault_items AS v
+             SET encrypted_data = n.encrypted_data, nonce = n.nonce, revision = n.revision,
+                 updated_at = now()
+             FROM unnest($2::uuid[], $3::integer[], $4::bytea[], $5::bytea[])
+               AS n (id, revision, encrypted_data, nonce)
+             WHERE v.id = n.id AND v.user_id = $1
+             RETURNING ${ITEM_COLUMNS.split(', ')
+               .map((column) => `v.${column}`)
+               .join(', ')}`,
+            [
+              request.userId,
+              items.map((item) => item.id),
+              items.map((item) => item.revision),
+              items.map((item) => item.encryptedData),
+              items.map((item) => item.nonce),
+            ],
+          );
+          // The manifest, re-encrypted under the new vault key, moves on with the items.
+          await advanceManifest(db, request.userId, body.manifest);
+          await db.query(
+            `UPDATE users SET auth_hash = $2, kdf_salt = $3, kdf_params = $4,
+               encrypted_vault_key = $5, vault_key_nonce = $6
+             WHERE id = $1`,
+            [
+              request.userId,
+              hashAuthHash(newAuthHash),
+              kdfSalt,
+              { memoryCost, iterations, parallelism },
+              encryptedVaultKey,
+              vaultKeyNonce,
+            ],
+          );
+          await db.query('DELETE FROM sessions WHERE user_id = $1 AND id <> $2', [
             request.userId,
-            items.map((item) => item.id),
-            items.map((item) => item.revision),
-            items.map((item) => item.encryptedData),
-            items.map((item) => item.nonce),
-          ],
-        ));
-        await client.query(
-          `UPDATE users SET auth_hash = $2, kdf_salt = $3, kdf_params = $4,
-             encrypted_vault_key = $5, vault_key_nonce = $6
-           WHERE id = $1`,
-          [
-            request.userId,
-            hashAuthHash(newAuthHash),
-            kdfSalt,
-            { memoryCost, iterations, parallelism },
-            encryptedVaultKey,
-            vaultKeyNonce,
-          ],
-        );
-        await client.query('DELETE FROM sessions WHERE user_id = $1 AND id <> $2', [
-          request.userId,
-          request.sessionId,
-        ]);
-        await client.query('COMMIT');
+            request.sessionId,
+          ]);
+          return rows;
+        });
       } catch (error) {
-        // Also undoes the transaction for the 403 and 409 thrown above.
-        await client.query('ROLLBACK').catch(() => {});
         if (isUniqueViolation(error)) throw conflict(NONCE_REUSE_MESSAGE);
         throw error;
-      } finally {
-        client.release();
-        // The right password shouldn't use up an attempt, even if the change
-        // itself is refused (e.g. the vault changed meanwhile).
-        if (passwordVerified) await clearLoginFailures(pool, email);
       }
 
       const order = new Map(items.map((item, index) => [item.id, index]));
       updated.sort((a, b) => order.get(a.id)! - order.get(b.id)!);
       return { items: updated.map(toItemResponse) };
+    },
+  );
+
+  const sensitive = {
+    onRequest: authenticate,
+    config: { rateLimit: { max: config.authRateLimitMax, timeWindow: '1 minute' } },
+  };
+
+  app.get(
+    '/account',
+    { onRequest: authenticate, schema: { response: { 200: accountResponseSchema } } },
+    async (request) => {
+      const { rows } = await pool.query<{
+        email: string;
+        created_at: Date;
+        totp_enabled: boolean;
+        recovery_codes_remaining: number;
+      }>(
+        `SELECT email, created_at, totp_secret IS NOT NULL AS totp_enabled,
+           (SELECT count(*)::int FROM totp_recovery_codes WHERE user_id = users.id)
+             AS recovery_codes_remaining
+         FROM users WHERE id = $1`,
+        [request.userId],
+      );
+      return rows[0]!;
+    },
+  );
+
+  // Step 1 of turning on two-factor: a new secret for the user's
+  // authenticator app. Nothing changes until it's confirmed with a code.
+  app.post(
+    '/account/totp/setup',
+    { ...sensitive, schema: { response: { 200: totpSetupResponseSchema } } },
+    async (request) => {
+      const secret = generateTotpSecret();
+      const { rows } = await pool.query<{ email: string }>(
+        `UPDATE users SET totp_pending_secret = $2
+         WHERE id = $1 AND totp_secret IS NULL
+         RETURNING email`,
+        [request.userId, secret],
+      );
+      if (!rows[0]) throw conflict('Two-factor authentication is already on.');
+      return { secret: base32Encode(secret), otpauth_uri: otpauthUri(rows[0].email, secret) };
+    },
+  );
+
+  // Step 2: the master password plus a code from the app proves it was set
+  // up correctly. Returns one-time recovery codes, shown only this once.
+  app.post<{ Body: { current_auth_hash: string; totp_code: string } }>(
+    '/account/totp/enable',
+    {
+      ...sensitive,
+      schema: { body: enableTotpBodySchema, response: { 200: recoveryCodesResponseSchema } },
+    },
+    async (request) => {
+      await verifyCurrentUser(
+        pool,
+        config,
+        request.userId,
+        { current_auth_hash: decodeAuthHash(request.body.current_auth_hash) },
+        { requireSecondFactor: false },
+      );
+      const recoveryCodes = await withTransaction(pool, async (db) => {
+        const { rows } = await db.query<{ totp_pending_secret: Buffer | null; enabled: boolean }>(
+          `SELECT totp_pending_secret, totp_secret IS NOT NULL AS enabled
+           FROM users WHERE id = $1 FOR UPDATE`,
+          [request.userId],
+        );
+        const { totp_pending_secret: pending, enabled } = rows[0]!;
+        if (enabled) throw conflict('Two-factor authentication is already on.');
+        if (!pending) throw conflict('Start two-factor setup first.');
+        const step = verifyTotp(pending, request.body.totp_code, 0);
+        if (step === null) {
+          throw forbidden('That code doesn’t match. Check the time on your device and try again.');
+        }
+        await db.query(
+          `UPDATE users SET totp_secret = totp_pending_secret, totp_pending_secret = NULL,
+             totp_last_step = $2
+           WHERE id = $1`,
+          [request.userId, step],
+        );
+        return replaceRecoveryCodes(db, request.userId);
+      });
+      return { recovery_codes: recoveryCodes };
+    },
+  );
+
+  app.post<{ Body: ReauthBody }>(
+    '/account/totp/disable',
+    { ...sensitive, schema: { body: reauthBodySchema } },
+    async (request, reply) => {
+      await verifyCurrentUser(
+        pool,
+        config,
+        request.userId,
+        { ...request.body, current_auth_hash: decodeAuthHash(request.body.current_auth_hash) },
+        { requireSecondFactor: true },
+      );
+      await withTransaction(pool, async (db) => {
+        await db.query(
+          `UPDATE users SET totp_secret = NULL, totp_pending_secret = NULL, totp_last_step = 0
+           WHERE id = $1`,
+          [request.userId],
+        );
+        await db.query('DELETE FROM totp_recovery_codes WHERE user_id = $1', [request.userId]);
+      });
+      return reply.code(204).send();
+    },
+  );
+
+  app.post<{ Body: ReauthBody }>(
+    '/account/totp/recovery-codes',
+    {
+      ...sensitive,
+      schema: { body: reauthBodySchema, response: { 200: recoveryCodesResponseSchema } },
+    },
+    async (request) => {
+      await verifyCurrentUser(
+        pool,
+        config,
+        request.userId,
+        { ...request.body, current_auth_hash: decodeAuthHash(request.body.current_auth_hash) },
+        { requireSecondFactor: true },
+      );
+      const { rows } = await pool.query<{ enabled: boolean }>(
+        'SELECT totp_secret IS NOT NULL AS enabled FROM users WHERE id = $1',
+        [request.userId],
+      );
+      if (!rows[0]?.enabled) throw conflict('Two-factor authentication is off.');
+      return {
+        recovery_codes: await withTransaction(pool, (db) =>
+          replaceRecoveryCodes(db, request.userId),
+        ),
+      };
+    },
+  );
+
+  // Deletes the account and everything in it: items, sessions, codes.
+  app.delete<{ Body: ReauthBody }>(
+    '/account',
+    { ...sensitive, schema: { body: reauthBodySchema } },
+    async (request, reply) => {
+      const { email } = await verifyCurrentUser(
+        pool,
+        config,
+        request.userId,
+        { ...request.body, current_auth_hash: decodeAuthHash(request.body.current_auth_hash) },
+        { requireSecondFactor: true },
+      );
+      await withTransaction(pool, async (db) => {
+        await db.query('DELETE FROM users WHERE id = $1', [request.userId]);
+        await db.query('DELETE FROM login_failures WHERE email = $1', [email]);
+      });
+      return reply.code(204).send();
     },
   );
 }

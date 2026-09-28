@@ -66,3 +66,21 @@ export async function reserveLoginAttempt(
 export async function clearLoginFailures(pool: pg.Pool, email: string): Promise<void> {
   await pool.query('DELETE FROM login_failures WHERE email = $1', [email]);
 }
+
+/**
+ * Gives back one reserved attempt, for a request that proved the password
+ * but still needs its second factor. (Clearing the count instead would let
+ * someone who knows the password reset the budget for guessing codes.)
+ */
+export async function refundLoginAttempt(pool: pg.Pool, email: string): Promise<void> {
+  await pool.query(
+    `WITH refunded AS (
+       UPDATE login_failures SET failure_count = failure_count - 1
+       WHERE email = $1 AND failure_count > 1
+       RETURNING email
+     )
+     DELETE FROM login_failures
+     WHERE email = $1 AND failure_count = 1 AND NOT EXISTS (SELECT 1 FROM refunded)`,
+    [email],
+  );
+}

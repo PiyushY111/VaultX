@@ -20,3 +20,12 @@ export {
 } from './aead.js';
 export { CryptoInputError, DecryptionError } from './errors.js';
 export { KEY_BYTES, NONCE_BYTES, SALT_BYTES, TAG_BYTES } from './constants.js';
+export {
+  checkAgainstManifest,
+  decryptManifest,
+  encryptManifest,
+  nextManifest,
+  type ItemVersion,
+  type ManifestCheck,
+  type VaultManifest,
+} from './manifest.js';

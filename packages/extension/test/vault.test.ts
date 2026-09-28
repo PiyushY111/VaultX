@@ -1,7 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_SETTINGS } from '../src/background/settings';
-import { LockedError, PENDING_SAVE_TTL_MS, Vault } from '../src/background/vault';
-import { MemoryStore, SERVER, createFakeServer } from './helpers';
+import {
+  LockedError,
+  PENDING_SAVE_TTL_MS,
+  SecondFactorRequiredError,
+  Vault,
+} from '../src/background/vault';
+import { FAKE_TOTP_CODE, MemoryStore, SERVER, createFakeServer } from './helpers';
 
 const EMAIL = 'alice@example.com';
 const PASSWORD = 'MASTER-correct-horse-battery-staple';
@@ -328,7 +333,9 @@ describe('item revisions', () => {
     const sites = (await makeVault().listForPopup()).map((item) => item.site);
     expect(sites).toEqual(['https://bank.example.com/login']);
     // The ledger holds only ids and revision numbers.
-    expect(Object.values(local.data.get(`revisions:${EMAIL}`) as object)).toEqual([2, 1]);
+    const ledger = local.data.get(`revisions:${EMAIL}`) as Record<string, number>;
+    expect(ledger[githubId]).toBe(2);
+    expect(Object.values(ledger).every((value) => Number.isInteger(value))).toBe(true);
   });
 
   it('drops its cache after a conflicting save, so the next attempt uses fresh data', async () => {
@@ -376,5 +383,87 @@ describe('adding a login from the popup', () => {
     const before = server.items.length;
     await expect(vault.addItem({ ...NEW, site: '   ' })).rejects.toThrow('Enter the site');
     expect(server.items).toHaveLength(before);
+  });
+});
+
+describe('two-factor unlock', () => {
+  it('asks for a code after the password, then unlocks without deriving keys again', async () => {
+    server.enableTwoFactor();
+    const vault = makeVault();
+    await expect(vault.unlock(EMAIL, PASSWORD)).rejects.toThrow(SecondFactorRequiredError);
+    expect(await vault.isUnlocked()).toBe(false);
+    // Nothing about the pending sign-in is persisted.
+    expect(session.data.size).toBe(0);
+
+    await expect(vault.unlockSecondFactor('000000', false)).rejects.toThrow(/incorrect/);
+    const prelogins = server.requests.filter((r) => r.url.endsWith('/prelogin')).length;
+    await vault.unlockSecondFactor(FAKE_TOTP_CODE, false);
+    expect(await vault.isUnlocked()).toBe(true);
+    expect(server.requests.filter((r) => r.url.endsWith('/prelogin'))).toHaveLength(prelogins);
+    await expect(vault.unlockSecondFactor(FAKE_TOTP_CODE, false)).rejects.toThrow(/expired/);
+  });
+
+  it('accepts a recovery code, and forgets a pending sign-in after five minutes', async () => {
+    server.enableTwoFactor(['RECOV-ERY01']);
+    const vault = makeVault();
+    await expect(vault.unlock(EMAIL, PASSWORD)).rejects.toThrow(SecondFactorRequiredError);
+    clock += 5 * 60_000 + 1;
+    await expect(vault.unlockSecondFactor(FAKE_TOTP_CODE, false)).rejects.toThrow(/expired/);
+
+    await expect(vault.unlock(EMAIL, PASSWORD)).rejects.toThrow(SecondFactorRequiredError);
+    await vault.unlockSecondFactor(' RECOV-ERY01 ', true);
+    expect(await vault.isUnlocked()).toBe(true);
+  });
+});
+
+describe('vault manifest', () => {
+  it('writes a first manifest on load, and moves it on with every save', async () => {
+    const vault = makeVault();
+    await vault.unlock(EMAIL, PASSWORD);
+    await vault.listForPopup();
+    expect(server.state.manifest!.version).toBe(1);
+    await vault.addItem({ site: 'new.example.com', username: 'u', password: 'p', notes: '' });
+    expect(server.state.manifest!.version).toBe(2);
+    expect(await vault.vaultWarnings()).toEqual({
+      failed: 0,
+      rolledBack: 0,
+      missing: 0,
+      unexpected: 0,
+      manifest: null,
+    });
+  });
+
+  it('warns about items the server hides or adds, even with no history in this browser', async () => {
+    const first = makeVault();
+    await first.unlock(EMAIL, PASSWORD);
+    await first.listForPopup();
+    const bank = server.items.find((item) => item.id !== githubId)!;
+    server.items.splice(server.items.indexOf(bank), 1);
+    await server.seedItem(vaultKey, {
+      site: 'planted.example.com',
+      username: '',
+      password: '',
+      notes: '',
+    });
+
+    local = new MemoryStore(); // a browser that has never seen this vault
+    const fresh = makeVault();
+    const sites = (await fresh.listForPopup()).map((item) => item.site);
+    expect(sites).toEqual(['github.com']);
+    expect(await fresh.vaultWarnings()).toMatchObject({ missing: 1, unexpected: 1 });
+  });
+
+  it('retries a save once if the vault changed elsewhere meanwhile', async () => {
+    const vault = makeVault();
+    await vault.unlock(EMAIL, PASSWORD);
+    await vault.listForPopup();
+    // Another device writes: the manifest moves on.
+    const other = makeVault();
+    await other.addItem({ site: 'other.example.com', username: '', password: 'x', notes: '' });
+
+    await vault.addItem({ site: 'mine.example.com', username: '', password: 'y', notes: '' });
+    const sites = (await makeVault().listForPopup()).map((item) => item.site);
+    expect(sites).toEqual(expect.arrayContaining(['other.example.com', 'mine.example.com']));
+    expect(await makeVault().vaultWarnings()).toMatchObject({ missing: 0, unexpected: 0 });
   });
 });

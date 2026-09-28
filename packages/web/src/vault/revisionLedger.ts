@@ -24,10 +24,15 @@ export interface RevisionLedger {
   record(items: readonly ItemVersion[]): void;
   /** Deleted items stay recorded, so the server can't bring them back. */
   markDeleted(id: string): void;
+  /** The newest vault manifest version this browser has seen (0 if none). */
+  manifestVersion(): number;
+  recordManifest(version: number): void;
 }
 
 const STORAGE_PREFIX = 'password-manager.revisions:';
 const DELETED = Number.MAX_SAFE_INTEGER;
+// Stored alongside the item ids, which are UUIDs, so it can't collide.
+const MANIFEST_KEY = '#manifest';
 
 export const revisionStorageKey = (email: string) => `${STORAGE_PREFIX}${email}`;
 
@@ -74,7 +79,9 @@ export function createRevisionLedger(
     findRollbacks(items) {
       const seen = load();
       return new Set(
-        items.filter((item) => item.revision < (seen[item.id] ?? 0)).map((item) => item.id),
+        items
+          .filter((item) => item.id !== MANIFEST_KEY && item.revision < (seen[item.id] ?? 0))
+          .map((item) => item.id),
       );
     },
     record(items) {
@@ -85,6 +92,14 @@ export function createRevisionLedger(
     markDeleted(id) {
       known = load();
       known[id] = DELETED;
+      save();
+    },
+    manifestVersion() {
+      return load()[MANIFEST_KEY] ?? 0;
+    },
+    recordManifest(version) {
+      known = load();
+      known[MANIFEST_KEY] = Math.max(known[MANIFEST_KEY] ?? 0, version);
       save();
     },
   };

@@ -19,3 +19,5 @@ export const AAD_VAULT_KEY = 'password-manager:v1:vault-key';
 export const AAD_ITEM_LEGACY = 'password-manager:v1:item';
 /** Prefix of an item's AAD; the item ID and revision are appended (see aead.ts). */
 export const AAD_ITEM = 'password-manager:v2:item';
+/** Prefix of the vault manifest's AAD; the manifest version is appended (see manifest.ts). */
+export const AAD_MANIFEST = 'password-manager:v1:manifest';

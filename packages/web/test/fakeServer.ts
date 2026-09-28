@@ -12,6 +12,12 @@ export interface RecordedRequest {
   body: string;
 }
 
+interface StoredManifest {
+  version: number;
+  encrypted_data: string;
+  nonce: string;
+}
+
 interface StoredUser {
   email: string;
   authHash: string;
@@ -19,7 +25,14 @@ interface StoredUser {
   vaultKeyNonce: string;
   kdfSalt: string;
   kdfParams: unknown;
+  manifest: StoredManifest | null;
+  totpEnabled: boolean;
+  recoveryCodes: string[];
 }
+
+/** The fake's authenticator: this code is always valid when two-factor is on. */
+export const FAKE_TOTP_CODE = '123456';
+export const FAKE_TOTP_SECRET = 'JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP';
 
 export interface StoredItem {
   id: string;
@@ -94,6 +107,9 @@ export function installFakeServer(): FakeServer {
         vaultKeyNonce: body.vault_key_nonce,
         kdfSalt: body.kdf_salt,
         kdfParams: body.kdf_params,
+        manifest: null,
+        totpEnabled: false,
+        recoveryCodes: [],
       });
       return json(201, { id: body.email });
     }
@@ -109,6 +125,20 @@ export function installFakeServer(): FakeServer {
       if (!user || user.authHash !== body.auth_hash) {
         return json(401, { message: 'Invalid email or auth hash' });
       }
+      if (user.totpEnabled) {
+        if (!body.totp_code && !body.recovery_code) {
+          return json(401, { message: 'Enter the 6-digit code.', totp_required: true });
+        }
+        const recoveryIndex = user.recoveryCodes.indexOf(body.recovery_code);
+        if (body.totp_code !== FAKE_TOTP_CODE && recoveryIndex === -1) {
+          return json(401, {
+            message: 'That two-factor code is incorrect or was already used.',
+            totp_required: true,
+            attempts_remaining: 4,
+          });
+        }
+        if (recoveryIndex !== -1) user.recoveryCodes.splice(recoveryIndex, 1);
+      }
       const newToken = `token-${nextId++}`;
       sessions.set(newToken, {
         id: crypto.randomUUID(),
@@ -122,6 +152,89 @@ export function installFakeServer(): FakeServer {
       });
     }
     if (!owner) return unauthorized();
+    const user = users.get(owner)!;
+    const reauthFails = (needsFactor: boolean) => {
+      if (body.current_auth_hash !== user.authHash) {
+        return json(403, { message: 'Current master password is incorrect.' });
+      }
+      if (needsFactor && user.totpEnabled) {
+        const index = user.recoveryCodes.indexOf(body.recovery_code);
+        if (body.totp_code !== FAKE_TOTP_CODE && index === -1) {
+          return json(403, {
+            message: 'That two-factor code is incorrect or was already used.',
+            totp_required: true,
+          });
+        }
+        if (index !== -1) user.recoveryCodes.splice(index, 1);
+      }
+      return null;
+    };
+    /** Applies the write's manifest if it's the next version, like the real server. */
+    const manifestConflict = (manifest: StoredManifest | undefined) => {
+      const current = user.manifest?.version ?? 0;
+      if (!manifest || manifest.version !== current + 1) {
+        return json(409, {
+          message: 'Your vault was changed elsewhere.',
+          manifest_version: current,
+        });
+      }
+      return null;
+    };
+    const newCodes = () =>
+      Array.from({ length: 10 }, (_, i) => `CODE${i}-${Math.random().toString(36).slice(2, 7)}`);
+
+    if (method === 'GET' && path === '/account') {
+      return json(200, {
+        email: user.email,
+        created_at: now,
+        totp_enabled: user.totpEnabled,
+        recovery_codes_remaining: user.recoveryCodes.length,
+      });
+    }
+    if (method === 'POST' && path === '/account/totp/setup') {
+      if (user.totpEnabled)
+        return json(409, { message: 'Two-factor authentication is already on.' });
+      return json(200, {
+        secret: FAKE_TOTP_SECRET,
+        otpauth_uri: `otpauth://totp/VaultX:${encodeURIComponent(user.email)}?secret=${FAKE_TOTP_SECRET}&issuer=VaultX`,
+      });
+    }
+    if (method === 'POST' && path === '/account/totp/enable') {
+      const failed = reauthFails(false);
+      if (failed) return failed;
+      if (body.totp_code !== FAKE_TOTP_CODE)
+        return json(403, { message: 'That code doesn’t match.' });
+      user.totpEnabled = true;
+      user.recoveryCodes = newCodes();
+      return json(200, { recovery_codes: user.recoveryCodes });
+    }
+    if (method === 'POST' && path === '/account/totp/disable') {
+      const failed = reauthFails(true);
+      if (failed) return failed;
+      user.totpEnabled = false;
+      user.recoveryCodes = [];
+      return noContent();
+    }
+    if (method === 'POST' && path === '/account/totp/recovery-codes') {
+      const failed = reauthFails(true);
+      if (failed) return failed;
+      user.recoveryCodes = newCodes();
+      return json(200, { recovery_codes: user.recoveryCodes });
+    }
+    if (method === 'DELETE' && path === '/account') {
+      const failed = reauthFails(true);
+      if (failed) return failed;
+      users.delete(owner);
+      for (const [id, item] of items) if (item.owner === owner) items.delete(id);
+      for (const [t, s] of sessions) if (s.owner === owner) sessions.delete(t);
+      return noContent();
+    }
+    if (method === 'PUT' && path === '/vault-manifest') {
+      const conflict = manifestConflict(body);
+      if (conflict) return conflict;
+      user.manifest = body;
+      return noContent();
+    }
 
     if (method === 'POST' && path === '/logout') {
       sessions.delete(token);
@@ -153,7 +266,6 @@ export function installFakeServer(): FakeServer {
       return noContent();
     }
     if (method === 'POST' && path === '/account/password') {
-      const user = users.get(owner)!;
       if (body.current_auth_hash !== user.authHash) {
         return json(403, { message: 'Current master password is incorrect.' });
       }
@@ -165,6 +277,9 @@ export function installFakeServer(): FakeServer {
           sent.some((next) => next.id === item.id && next.revision === item.revision + 1),
         );
       if (!complete) return json(409, { message: 'Your vault changed while it was re-encrypted' });
+      const conflict = manifestConflict(body.manifest);
+      if (conflict) return conflict;
+      user.manifest = body.manifest;
       for (const next of sent) {
         Object.assign(items.get(next.id)!, {
           revision: next.revision,
@@ -185,7 +300,6 @@ export function installFakeServer(): FakeServer {
     }
 
     if (method === 'GET' && path === '/vault-key') {
-      const user = users.get(owner)!;
       return json(200, {
         encrypted_vault_key: user.encryptedVaultKey,
         vault_key_nonce: user.vaultKeyNonce,
@@ -195,11 +309,15 @@ export function installFakeServer(): FakeServer {
     }
     if (method === 'GET' && path === '/vault-items') {
       const mine = [...items.values()].filter((item) => item.owner === owner).map(publicItem);
-      return json(200, { items: mine });
+      return json(200, { items: mine, manifest: user.manifest });
     }
     if (method === 'POST' && path === '/vault-items') {
       if (body.revision !== 1 || items.has(body.id)) return json(409, { message: 'Conflict' });
-      const item = { ...body, owner, created_at: now, updated_at: now };
+      const { manifest, ...fields } = body;
+      const conflict = manifestConflict(manifest);
+      if (conflict) return conflict;
+      user.manifest = manifest;
+      const item = { ...fields, owner, created_at: now, updated_at: now };
       items.set(item.id, item);
       return json(201, publicItem(item));
     }
@@ -213,10 +331,17 @@ export function installFakeServer(): FakeServer {
           current_revision: existing.revision,
         });
       }
-      Object.assign(existing, body, { updated_at: now });
+      const { manifest, ...fields } = body;
+      const conflict = manifestConflict(manifest);
+      if (conflict) return conflict;
+      user.manifest = manifest;
+      Object.assign(existing, fields, { updated_at: now });
       return json(200, publicItem(existing));
     }
     if (method === 'DELETE') {
+      const conflict = manifestConflict(body.manifest);
+      if (conflict) return conflict;
+      user.manifest = body.manifest;
       items.delete(existing.id);
       return noContent();
     }

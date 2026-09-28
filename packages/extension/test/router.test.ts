@@ -8,7 +8,7 @@ import {
 import { DEFAULT_SETTINGS } from '../src/background/settings';
 import { Vault } from '../src/background/vault';
 import { CONTENT_REQUEST_TYPES, POPUP_REQUEST_TYPES } from '../src/shared/messages';
-import { MemoryStore, SERVER, createFakeServer } from './helpers';
+import { FAKE_TOTP_CODE, MemoryStore, SERVER, createFakeServer } from './helpers';
 
 const EXTENSION_ID = 'abcdefghijklmnopabcdefghijklmnop';
 const POPUP_URL = `chrome-extension://${EXTENSION_ID}/popup.html`;
@@ -158,6 +158,41 @@ describe('handleMessage authorization', () => {
     expect(await handleMessage({ type: 'listItems' }, popup, deps)).toMatchObject({
       ok: true,
       data: [item],
+    });
+  });
+
+  it('tells the popup when unlocking needs a two-factor code', async () => {
+    const server = createFakeServer();
+    await server.register('b@example.com', 'MASTER-password-123');
+    server.enableTwoFactor();
+    const store = new MemoryStore();
+    const twoFactorDeps: RouterDeps = {
+      ...deps,
+      settingsStore: store,
+      vault: new Vault({
+        session: new MemoryStore(),
+        local: new MemoryStore(),
+        fetch: server.fetch,
+        now: () => Date.now(),
+        getSettings: async () => ({ ...DEFAULT_SETTINGS, serverUrl: SERVER }),
+      }),
+    };
+    const unlock = { type: 'unlock', email: 'b@example.com', password: 'MASTER-password-123' };
+    expect(await handleMessage(unlock, popup, twoFactorDeps)).toMatchObject({
+      ok: false,
+      secondFactor: true,
+    });
+    expect(
+      await handleMessage(
+        { type: 'unlockSecondFactor', code: FAKE_TOTP_CODE, recovery: false },
+        popup,
+        twoFactorDeps,
+      ),
+    ).toEqual({ ok: true, data: null });
+    expect(await store.get('lastEmail')).toBe('b@example.com');
+    expect(await handleMessage({ type: 'getWarnings' }, popup, twoFactorDeps)).toMatchObject({
+      ok: true,
+      data: { missing: 0 },
     });
   });
 

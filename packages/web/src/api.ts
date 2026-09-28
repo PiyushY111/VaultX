@@ -26,6 +26,8 @@ export class ApiError extends Error {
  */
 export function describeLoginFailure(error: ApiError): string {
   const { attempts_remaining: remaining, retry_after_seconds: retryAfter } = error.details;
+  // The password was right; the server's message is about the code.
+  if (needsSecondFactor(error)) return error.message;
   if (error.status === 429) {
     if (typeof retryAfter !== 'number') return error.message; // Per-IP rate limit.
     const minutes = Math.max(1, Math.ceil(retryAfter / 60));
@@ -38,6 +40,13 @@ export function describeLoginFailure(error: ApiError): string {
   }
   return `${base} This account is now temporarily locked after too many failed attempts.`;
 }
+
+/** The password was right, and the account needs a two-factor code too. */
+export const needsSecondFactor = (error: unknown): boolean =>
+  error instanceof ApiError && error.details.totp_required === true;
+
+/** A second factor: a code from the authenticator app, or a recovery code. */
+export type SecondFactor = { totp_code: string } | { recovery_code: string };
 
 export interface SignupRequest {
   email: string;
@@ -76,6 +85,29 @@ export interface ItemRevisionPayload extends EncryptedItemPayload {
   revision: number;
 }
 
+/** The encrypted vault manifest at one version (see @password-manager/crypto). */
+export interface ManifestPayload extends EncryptedItemPayload {
+  version: number;
+}
+
+export interface VaultResponse {
+  items: ItemResponse[];
+  manifest: ManifestPayload | null;
+}
+
+export interface AccountInfo {
+  email: string;
+  created_at: string;
+  totp_enabled: boolean;
+  recovery_codes_remaining: number;
+}
+
+/** Re-authentication for sensitive account changes. */
+export type Reauth = { current_auth_hash: string } & Partial<{
+  totp_code: string;
+  recovery_code: string;
+}>;
+
 export interface ItemResponse extends EncryptedItemPayload {
   id: string;
   revision: number;
@@ -101,6 +133,7 @@ export interface ChangePasswordRequest {
   encrypted_vault_key: string;
   vault_key_nonce: string;
   items: ItemRevisionPayload[];
+  manifest: ManifestPayload;
 }
 
 async function request<T>(
@@ -132,20 +165,42 @@ async function request<T>(
 export const api = {
   signup: (body: SignupRequest) => request<{ id: string }>('POST', '/signup', { body }),
   prelogin: (email: string) => request<PreloginResponse>('POST', '/prelogin', { body: { email } }),
-  login: (email: string, authHash: string) =>
+  login: (email: string, authHash: string, factor?: SecondFactor) =>
     request<LoginResponse>('POST', '/login', {
-      body: { email, auth_hash: authHash, client: 'web' },
+      body: { email, auth_hash: authHash, client: 'web', ...factor },
     }),
   logout: (token: string) => request<void>('POST', '/logout', { token }),
   getVaultKey: (token: string) => request<VaultKeyResponse>('GET', '/vault-key', { token }),
-  listItems: (token: string) =>
-    request<{ items: ItemResponse[] }>('GET', '/vault-items', { token }),
-  createItem: (token: string, body: ItemRevisionPayload) =>
-    request<ItemResponse>('POST', '/vault-items', { token, body }),
-  updateItem: (token: string, { id, ...body }: ItemRevisionPayload) =>
-    request<ItemResponse>('PUT', `/vault-items/${encodeURIComponent(id)}`, { token, body }),
-  deleteItem: (token: string, id: string) =>
-    request<void>('DELETE', `/vault-items/${encodeURIComponent(id)}`, { token }),
+  listItems: (token: string) => request<VaultResponse>('GET', '/vault-items', { token }),
+  // Every write carries the vault's next manifest; the server applies both or neither.
+  createItem: (token: string, item: ItemRevisionPayload, manifest: ManifestPayload) =>
+    request<ItemResponse>('POST', '/vault-items', { token, body: { ...item, manifest } }),
+  updateItem: (token: string, { id, ...item }: ItemRevisionPayload, manifest: ManifestPayload) =>
+    request<ItemResponse>('PUT', `/vault-items/${encodeURIComponent(id)}`, {
+      token,
+      body: { ...item, manifest },
+    }),
+  deleteItem: (token: string, id: string, manifest: ManifestPayload) =>
+    request<void>('DELETE', `/vault-items/${encodeURIComponent(id)}`, {
+      token,
+      body: { manifest },
+    }),
+  putManifest: (token: string, manifest: ManifestPayload) =>
+    request<void>('PUT', '/vault-manifest', { token, body: manifest }),
+  getAccount: (token: string) => request<AccountInfo>('GET', '/account', { token }),
+  setupTotp: (token: string) =>
+    request<{ secret: string; otpauth_uri: string }>('POST', '/account/totp/setup', { token }),
+  enableTotp: (token: string, body: { current_auth_hash: string; totp_code: string }) =>
+    request<{ recovery_codes: string[] }>('POST', '/account/totp/enable', { token, body }),
+  disableTotp: (token: string, body: Reauth) =>
+    request<void>('POST', '/account/totp/disable', { token, body }),
+  regenerateRecoveryCodes: (token: string, body: Reauth) =>
+    request<{ recovery_codes: string[] }>('POST', '/account/totp/recovery-codes', {
+      token,
+      body,
+    }),
+  deleteAccount: (token: string, body: Reauth) =>
+    request<void>('DELETE', '/account', { token, body }),
   listSessions: (token: string) =>
     request<{ sessions: SessionInfo[] }>('GET', '/sessions', { token }),
   revokeSession: (token: string, id: string) =>

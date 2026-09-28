@@ -43,6 +43,12 @@ After rebuilding, click the reload icon on the extension's card.
   background schedules it with `chrome.alarms` and opens an offscreen
   document to write the clipboard (permissions: `offscreen`,
   `clipboardWrite`; neither shows an install warning).
+- **Two-factor:** if the account has it on, the popup asks for the code after
+  the password. The derived keys wait in the background worker's memory
+  (never storage) for up to five minutes.
+- **Integrity checks:** the vault is checked against its encrypted manifest
+  like the web vault's, and every write sends the next manifest. The popup
+  warns about anything hidden, added, rolled back, or undecryptable.
 - **Authorization:** the background checks every message's browser-provided
   sender. Only the popup can unlock or list items; content scripts can only ask
   about their own tab's URL. See the trust-boundary comment at the top of

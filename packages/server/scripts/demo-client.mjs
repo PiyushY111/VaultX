@@ -4,20 +4,27 @@
 // The server never runs this code.
 //
 //   node scripts/demo-client.mjs signup        <email> <password>
-//   node scripts/demo-client.mjs login         <email> <password> <prelogin-response-json>
-//   node scripts/demo-client.mjs encrypt-item  <password> <vault-key-response-json> <plaintext>
-//   node scripts/demo-client.mjs update-item   <password> <vault-key-response-json> <item-response-json> <plaintext>
+//   node scripts/demo-client.mjs login         <email> <password> <prelogin-response-json> [totp-code]
+//   node scripts/demo-client.mjs encrypt-item  <password> <vault-key-response-json> <vault-items-response-json> <plaintext>
+//   node scripts/demo-client.mjs update-item   <password> <vault-key-response-json> <vault-items-response-json> <item-response-json> <plaintext>
+//   node scripts/demo-client.mjs delete-item   <password> <vault-key-response-json> <vault-items-response-json> <item-id>
 //   node scripts/demo-client.mjs decrypt-items <password> <vault-key-response-json> <vault-items-response-json>
+//
+// Item writes need the current GET /vault-items response, because each one
+// carries the vault's next encrypted manifest.
 import {
   DEFAULT_KDF_PARAMS,
   decryptItem,
   decryptVaultKey,
   deriveKeys,
   deriveMasterKey,
+  decryptManifest,
   encryptItem,
+  encryptManifest,
   encryptVaultKey,
   generateSalt,
   generateVaultKey,
+  nextManifest,
 } from '@password-manager/crypto';
 import { randomUUID } from 'node:crypto';
 
@@ -34,6 +41,22 @@ async function unlockVaultKey(password, vaultKeyResponse) {
     unb64(vk.vault_key_nonce),
     stretchedMasterKey,
   );
+}
+
+/** The vault's next manifest after `change`, encrypted, for a write request. */
+async function nextManifestBody(vaultKey, vaultItemsResponse, change) {
+  const { manifest } = JSON.parse(vaultItemsResponse);
+  const current = manifest
+    ? await decryptManifest(
+        unb64(manifest.encrypted_data),
+        unb64(manifest.nonce),
+        vaultKey,
+        manifest.version,
+      )
+    : null;
+  const next = nextManifest(current, change, 'demo-client');
+  const { ciphertext, nonce } = await encryptManifest(next, vaultKey);
+  return { version: next.version, encrypted_data: b64(ciphertext), nonce: b64(nonce) };
 }
 
 const [command, ...args] = process.argv.slice(2);
@@ -60,39 +83,62 @@ switch (command) {
     break;
   }
   case 'login': {
-    const [email, password, preloginResponse] = args;
+    const [email, password, preloginResponse, totpCode] = args;
     const { kdf_salt, kdf_params } = JSON.parse(preloginResponse);
     const { authHash } = await deriveKeys(
       await deriveMasterKey(password, unb64(kdf_salt), kdf_params),
     );
-    console.log(JSON.stringify({ email, auth_hash: b64(authHash) }));
+    console.log(
+      JSON.stringify({ email, auth_hash: b64(authHash), ...(totpCode && { totp_code: totpCode }) }),
+    );
     break;
   }
   case 'encrypt-item': {
-    const [password, vaultKeyResponse, plaintext] = args;
+    const [password, vaultKeyResponse, vaultItemsResponse, plaintext] = args;
     // A new item: the client picks its id and starts at revision 1 (both are bound into the AAD).
     const id = randomUUID();
-    const { ciphertext, nonce } = await encryptItem(
-      plaintext,
-      await unlockVaultKey(password, vaultKeyResponse),
-      { itemId: id, revision: 1 },
-    );
+    const vaultKey = await unlockVaultKey(password, vaultKeyResponse);
+    const { ciphertext, nonce } = await encryptItem(plaintext, vaultKey, {
+      itemId: id,
+      revision: 1,
+    });
+    const manifest = await nextManifestBody(vaultKey, vaultItemsResponse, {
+      set: [{ id, revision: 1 }],
+    });
     console.log(
-      JSON.stringify({ id, revision: 1, encrypted_data: b64(ciphertext), nonce: b64(nonce) }),
+      JSON.stringify({
+        id,
+        revision: 1,
+        encrypted_data: b64(ciphertext),
+        nonce: b64(nonce),
+        manifest,
+      }),
     );
     break;
   }
   case 'update-item': {
     // The next revision of an existing item, bound to its id.
-    const [password, vaultKeyResponse, itemResponse, plaintext] = args;
+    const [password, vaultKeyResponse, vaultItemsResponse, itemResponse, plaintext] = args;
     const { id, revision: current } = JSON.parse(itemResponse);
     const revision = current + 1;
-    const { ciphertext, nonce } = await encryptItem(
-      plaintext,
-      await unlockVaultKey(password, vaultKeyResponse),
-      { itemId: id, revision },
+    const vaultKey = await unlockVaultKey(password, vaultKeyResponse);
+    const { ciphertext, nonce } = await encryptItem(plaintext, vaultKey, { itemId: id, revision });
+    const manifest = await nextManifestBody(vaultKey, vaultItemsResponse, {
+      set: [{ id, revision }],
+    });
+    console.log(
+      JSON.stringify({ revision, encrypted_data: b64(ciphertext), nonce: b64(nonce), manifest }),
     );
-    console.log(JSON.stringify({ revision, encrypted_data: b64(ciphertext), nonce: b64(nonce) }));
+    break;
+  }
+  case 'delete-item': {
+    const [password, vaultKeyResponse, vaultItemsResponse, id] = args;
+    const vaultKey = await unlockVaultKey(password, vaultKeyResponse);
+    console.log(
+      JSON.stringify({
+        manifest: await nextManifestBody(vaultKey, vaultItemsResponse, { remove: [id] }),
+      }),
+    );
     break;
   }
   case 'decrypt-items': {
@@ -110,6 +156,8 @@ switch (command) {
     break;
   }
   default:
-    console.error('usage: demo-client.mjs signup|login|encrypt-item|update-item|decrypt-items ...');
+    console.error(
+      'usage: demo-client.mjs signup|login|encrypt-item|update-item|delete-item|decrypt-items ...',
+    );
     process.exit(1);
 }

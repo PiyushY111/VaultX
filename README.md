@@ -16,6 +16,10 @@ vault, stay on your devices:
   off old copies as current.
 - **You can change your master password**, which also rotates the vault key
   and re-encrypts every item, and see or end every session.
+- **An encrypted vault manifest** lists every item and revision, so any
+  device can tell when the server hides, adds or rolls back items.
+- **Optional two-factor login** (authenticator app codes, with recovery
+  codes), **account deletion**, and a printable **emergency kit**.
 - **The server stores opaque blobs.** Integration tests scan every raw
   database row to confirm no plaintext or key material is ever stored.
 
@@ -132,7 +136,8 @@ cryptographic design or the trust model, not just add a feature.
 
 Other known gaps are documented in THREAT_MODEL.md and not yet scheduled:
 
-- two-factor authentication
-- a signed vault manifest, so a device that has never seen the vault can
-  detect a stale copy (today rollback is caught only on devices that have
-  seen a newer revision)
+- proving to a brand-new device that it has the _latest_ copy of the vault
+  (the manifest catches hidden, added and rolled-back items anywhere, but a
+  whole consistent older copy can only be spotted by its "last changed" date)
+- phishing-resistant second factors (WebAuthn / passkeys); TOTP codes can be
+  phished like any typed code

@@ -1,11 +1,21 @@
 import { createHash } from 'node:crypto';
-import { DecryptionError, decryptItem, decryptVaultKey } from '@password-manager/crypto';
+import {
+  DecryptionError,
+  decryptItem,
+  decryptManifest,
+  decryptVaultKey,
+  nextManifest,
+} from '@password-manager/crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   b64,
   bearer,
   createClientUser,
   createItem,
+  currentManifest,
+  deleteItem,
+  encryptManifestBody,
+  totpCode,
   createTestContext,
   listTables,
   login,
@@ -67,6 +77,7 @@ describe('raw database rows never contain plaintext or key material', () => {
   let bob: ClientUser;
   /** Bob before his password change (old keys, old vault key). */
   let bobBefore: ClientUser;
+  let recoveryCodes: string[] = [];
   let aliceTokens: string[];
   let bobTokens: string[];
   let secrets: Secret[];
@@ -124,7 +135,13 @@ describe('raw database rows never contain plaintext or key material', () => {
       bobCreated.map(async ({ item: created, json }) => ({
         id: created.id,
         ...(await updatePayload(json, bob.vaultKey, created)),
+        manifest: undefined,
       })),
+    );
+    const bobManifest = nextManifest(
+      await currentManifest(app, b.token, bobBefore.vaultKey),
+      { set: reencrypted.map(({ id, revision }) => ({ id, revision })) },
+      'test',
     );
     const change = await app.inject({
       method: 'POST',
@@ -138,6 +155,7 @@ describe('raw database rows never contain plaintext or key material', () => {
         encrypted_vault_key: b64(bob.wrappedVaultKey.ciphertext),
         vault_key_nonce: b64(bob.wrappedVaultKey.nonce),
         items: reencrypted,
+        manifest: await encryptManifestBody(bobManifest, bob.vaultKey),
       },
     });
     expect(change.statusCode, change.body).toBe(200);
@@ -153,7 +171,10 @@ describe('raw database rows never contain plaintext or key material', () => {
 
     // Update alice's first item, delete her third.
     const updatedJson = JSON.stringify(ALICE_ITEM_UPDATED);
-    const payload = await updatePayload(updatedJson, alice.vaultKey, aliceCreated[0]!);
+    const payload = await updatePayload(updatedJson, alice.vaultKey, aliceCreated[0]!, {
+      app,
+      token: a.token,
+    });
     const put = await app.inject({
       method: 'PUT',
       url: `/vault-items/${aliceCreated[0]!.id}`,
@@ -168,13 +189,24 @@ describe('raw database rows never contain plaintext or key material', () => {
       plaintext: updatedJson,
       owner: 'alice',
     });
-    const del = await app.inject({
-      method: 'DELETE',
-      url: `/vault-items/${aliceCreated[2]!.id}`,
-      headers: bearer(a.token),
-    });
+    const del = await deleteItem(app, a.token, alice.vaultKey, aliceCreated[2]!.id);
     expect(del.statusCode).toBe(204);
     sentItems.delete(aliceCreated[2]!.id);
+
+    // Alice turns on two-factor login; the server may keep only hashes of her recovery codes.
+    const setup = await app.inject({
+      method: 'POST',
+      url: '/account/totp/setup',
+      headers: bearer(a.token),
+    });
+    const enable = await app.inject({
+      method: 'POST',
+      url: '/account/totp/enable',
+      headers: bearer(a.token),
+      payload: { current_auth_hash: b64(alice.authHash), totp_code: totpCode(setup.json().secret) },
+    });
+    expect(enable.statusCode, enable.body).toBe(200);
+    recoveryCodes = enable.json<{ recovery_codes: string[] }>().recovery_codes;
 
     secrets = [
       ...userSecrets('alice', alice, aliceTokens),
@@ -183,6 +215,12 @@ describe('raw database rows never contain plaintext or key material', () => {
       ...ALICE_ITEMS.flatMap((plain, i) => itemSecrets(`alice item ${i}`, plain)),
       ...itemSecrets('alice updated item', ALICE_ITEM_UPDATED),
       ...BOB_ITEMS.flatMap((plain, i) => itemSecrets(`bob item ${i}`, plain)),
+      ...recoveryCodes.flatMap((code, i) => [
+        { name: `alice recovery code #${i + 1}`, value: code },
+        { name: `alice recovery code #${i + 1} (normalized)`, value: code.replace('-', '') },
+      ]),
+      // A field name that appears only inside the manifest's plaintext JSON.
+      { name: 'manifest plaintext', value: '"updated_by"' },
     ];
   });
 
@@ -195,6 +233,7 @@ describe('raw database rows never contain plaintext or key material', () => {
       'login_failures',
       'schema_migrations',
       'sessions',
+      'totp_recovery_codes',
       'users',
       'vault_items',
     ]);
@@ -205,7 +244,7 @@ describe('raw database rows never contain plaintext or key material', () => {
     expect(leaks).toEqual([]);
     // Sanity check that the scan covered what we think it did: 3 key sets
     // (alice, bob before and after his password change) x (5 keys/passwords) + 3 session tokens + 5 items x (JSON + 4 fields).
-    expect(secrets).toHaveLength(3 * 5 + 3 + 5 * 5);
+    expect(secrets).toHaveLength(3 * 5 + 3 + 5 * 5 + 10 * 2 + 1);
   });
 
   it('users: stores only a hash of the authHash, plus ciphertext, nonce, salt and params exactly as sent', async () => {
@@ -221,6 +260,12 @@ describe('raw database rows never contain plaintext or key material', () => {
         'kdf_params',
         'kdf_salt',
         'vault_key_nonce',
+        'manifest_version',
+        'encrypted_manifest',
+        'manifest_nonce',
+        'totp_secret',
+        'totp_pending_secret',
+        'totp_last_step',
       ].sort(),
     );
 
@@ -244,6 +289,19 @@ describe('raw database rows never contain plaintext or key material', () => {
         user.stretchedMasterKey,
       );
       expect(unwrapped).toEqual(user.vaultKey);
+      // The manifest is ciphertext too, readable only with the vault key.
+      const manifest = await decryptManifest(
+        row.encrypted_manifest,
+        row.manifest_nonce,
+        user.vaultKey,
+        row.manifest_version,
+      );
+      expect(Object.keys(manifest.items).sort()).toEqual(
+        [...sentItems]
+          .filter(([, sent]) => sent.owner === (user === alice ? 'alice' : 'bob'))
+          .map(([id]) => id)
+          .sort(),
+      );
       await expect(
         decryptVaultKey(row.encrypted_vault_key, row.vault_key_nonce, user.authHash),
       ).rejects.toThrow(DecryptionError);

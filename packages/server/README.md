@@ -34,6 +34,26 @@ exactly the current revision + 1, or it gets a 409 with `current_revision`.
 Items saved before revisions existed are revision 0; clients decrypt them
 with the old format and re-save them as revision 1.
 
+### Vault manifest
+
+Every item write (`POST`, `PUT` and `DELETE /vault-items`) must include
+`manifest: {version, encrypted_data, nonce}`: the client's encrypted list of
+every item id and revision, at exactly the stored version + 1. The server
+can't read it; it applies the item change and the new manifest in one
+transaction, or neither (409 with `manifest_version`). `GET /vault-items`
+returns `{items, manifest}` from one snapshot, so clients can check the items
+against it. A vault without one (created before migration 004) gets its
+first from `PUT /vault-manifest`.
+
+### Two-factor login
+
+With two-factor on, `POST /login` needs `totp_code` (6 digits) or
+`recovery_code` as well. The server says so (401 with `totp_required: true`)
+only after the auth hash checks out, and that reply doesn't use up a login
+attempt; wrong codes do. Each TOTP time step and each recovery code works
+once. The TOTP secret is stored server-side (it has to be, to check codes);
+it guards logging in, not the vault's encryption.
+
 ### Changing the master password
 
 `POST /account/password` takes the current auth hash (to prove the old
@@ -41,8 +61,9 @@ password), the new auth hash, KDF salt and params, a **new** vault key wrapped
 under the new password, and every item re-encrypted under that key at its
 next revision. It's all-or-nothing: the item list must match the vault
 exactly, or nothing changes (409). Wrong current passwords get a 403 and count
-toward the same per-account lockout as failed logins. On success every other
-session is ended, since they hold the old vault key.
+toward the same per-account lockout as failed logins. It also carries the
+manifest, re-encrypted under the new vault key at the next version. On
+success every other session is ended, since they hold the old vault key.
 
 ## Running with Docker Compose
 
@@ -73,17 +94,21 @@ TOKEN=$(curl -s -X POST $API/login -H 'content-type: application/json' \
 
 VAULT_KEY=$(curl -s $API/vault-key -H "authorization: Bearer $TOKEN")
 
+# Each write sends the vault's next encrypted manifest, computed from the current vault.
+ITEMS=$(curl -s $API/vault-items -H "authorization: Bearer $TOKEN")
 ITEM=$(curl -s -X POST $API/vault-items -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
-  -d "$(node scripts/demo-client.mjs encrypt-item "$PW" "$VAULT_KEY" '{"site":"github.com","password":"hunter2"}')")
+  -d "$(node scripts/demo-client.mjs encrypt-item "$PW" "$VAULT_KEY" "$ITEMS" '{"site":"github.com","password":"hunter2"}')")
 ID=$(echo "$ITEM" | node -pe 'JSON.parse(require("fs").readFileSync(0)).id')
 
+ITEMS=$(curl -s $API/vault-items -H "authorization: Bearer $TOKEN")
 curl -s -X PUT $API/vault-items/$ID -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
-  -d "$(node scripts/demo-client.mjs update-item "$PW" "$VAULT_KEY" "$ITEM" '{"site":"github.com","password":"n3w"}')"
+  -d "$(node scripts/demo-client.mjs update-item "$PW" "$VAULT_KEY" "$ITEMS" "$ITEM" '{"site":"github.com","password":"n3w"}')"
 
 ITEMS=$(curl -s $API/vault-items -H "authorization: Bearer $TOKEN")
 node scripts/demo-client.mjs decrypt-items "$PW" "$VAULT_KEY" "$ITEMS"
 
-curl -s -X DELETE $API/vault-items/$ID -H "authorization: Bearer $TOKEN" -w '%{http_code}\n'
+curl -s -X DELETE $API/vault-items/$ID -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d "$(node scripts/demo-client.mjs delete-item "$PW" "$VAULT_KEY" "$ITEMS" "$ID")" -w '%{http_code}\n'
 ```
 
 ## Tests

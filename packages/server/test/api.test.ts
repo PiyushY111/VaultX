@@ -1,9 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import {
   decryptItem,
+  decryptManifest,
   decryptVaultKey,
   deriveKeys,
   deriveMasterKey,
+  nextManifest,
 } from '@password-manager/crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
@@ -13,7 +15,13 @@ import {
   createClientUser,
   createItem,
   createTestContext,
+  currentManifest,
+  deleteItem,
+  encryptManifestBody,
   encryptedItemPayload,
+  manifestFor,
+  PLACEHOLDER_MANIFEST,
+  totpCode,
   login,
   registerAndLogin,
   signup,
@@ -210,6 +218,13 @@ describe('authentication on protected routes', () => {
     { method: 'DELETE', url: '/sessions' },
     { method: 'DELETE', url: `/sessions/${randomUUID()}` },
     { method: 'POST', url: '/account/password' },
+    { method: 'PUT', url: '/vault-manifest' },
+    { method: 'GET', url: '/account' },
+    { method: 'POST', url: '/account/totp/setup' },
+    { method: 'POST', url: '/account/totp/enable' },
+    { method: 'POST', url: '/account/totp/disable' },
+    { method: 'POST', url: '/account/totp/recovery-codes' },
+    { method: 'DELETE', url: '/account' },
   ] as const;
 
   const badHeaders: [string, Record<string, string>][] = [
@@ -227,7 +242,7 @@ describe('authentication on protected routes', () => {
           method: route.method,
           url: route.url,
           headers,
-          ...((route.method === 'POST' || route.method === 'PUT') && { payload: {} }),
+          ...(route.method !== 'GET' && { payload: {} }),
         });
         expect(response.statusCode).toBe(401);
       },
@@ -291,7 +306,7 @@ describe('vault items CRUD', () => {
     const headers = bearer(token);
 
     const empty = await ctx.app.inject({ method: 'GET', url: '/vault-items', headers });
-    expect(empty.json()).toEqual({ items: [] });
+    expect(empty.json()).toEqual({ items: [], manifest: null });
 
     const a = await createItem(ctx.app, token, user.vaultKey, '{"n":"a"}');
     const b = await createItem(ctx.app, token, user.vaultKey, '{"n":"b"}');
@@ -316,7 +331,10 @@ describe('vault items CRUD', () => {
     );
     expect(decrypted).toEqual(['{"n":"a"}', '{"n":"b"}']);
 
-    const newPayload = await updatePayload('{"n":"a2"}', user.vaultKey, a);
+    const newPayload = await updatePayload('{"n":"a2"}', user.vaultKey, a, {
+      app: ctx.app,
+      token,
+    });
     const put = await ctx.app.inject({
       method: 'PUT',
       url: `/vault-items/${a.id}`,
@@ -341,10 +359,10 @@ describe('vault items CRUD', () => {
       ),
     ).toBe('{"n":"a2"}');
 
-    const del = await ctx.app.inject({ method: 'DELETE', url: `/vault-items/${b.id}`, headers });
+    const del = await deleteItem(ctx.app, token, user.vaultKey, b.id);
     expect(del.statusCode).toBe(204);
     expect(del.body).toBe('');
-    const again = await ctx.app.inject({ method: 'DELETE', url: `/vault-items/${b.id}`, headers });
+    const again = await deleteItem(ctx.app, token, user.vaultKey, b.id);
     expect(again.statusCode).toBe(404);
 
     const final = (await ctx.app.inject({ method: 'GET', url: '/vault-items', headers })).json<{
@@ -367,16 +385,20 @@ describe('vault items CRUD', () => {
         })
       ).statusCode,
     ).toBe(404);
-    expect(
-      (await ctx.app.inject({ method: 'DELETE', url: `/vault-items/${randomUUID()}`, headers }))
-        .statusCode,
-    ).toBe(404);
+    expect((await deleteItem(ctx.app, token, user.vaultKey, randomUUID())).statusCode).toBe(404);
     expect(
       (await ctx.app.inject({ method: 'PUT', url: '/vault-items/123', headers, payload }))
         .statusCode,
     ).toBe(400);
     expect(
-      (await ctx.app.inject({ method: 'DELETE', url: '/vault-items/123', headers })).statusCode,
+      (
+        await ctx.app.inject({
+          method: 'DELETE',
+          url: '/vault-items/123',
+          headers,
+          payload: { manifest: PLACEHOLDER_MANIFEST },
+        })
+      ).statusCode,
     ).toBe(400);
   });
 
@@ -388,8 +410,12 @@ describe('vault items CRUD', () => {
       revision: 1,
       encrypted_data: b64(new Uint8Array(32)),
       nonce: b64(new Uint8Array(24)),
+      manifest: PLACEHOLDER_MANIFEST,
     };
     const payloads = [
+      { ...valid, manifest: undefined },
+      { ...valid, manifest: { ...PLACEHOLDER_MANIFEST, version: 0 } },
+      { ...valid, manifest: { ...PLACEHOLDER_MANIFEST, nonce: b64(new Uint8Array(12)) } },
       { ...valid, encrypted_data: b64(new Uint8Array(15)) }, // shorter than a tag
       { ...valid, nonce: b64(new Uint8Array(12)) },
       { ...valid, encrypted_data: 'not base64!' },
@@ -431,6 +457,7 @@ describe('vault items CRUD', () => {
           revision: 1,
           encrypted_data: first.encrypted_data,
           nonce: first.nonce,
+          manifest: PLACEHOLDER_MANIFEST,
         },
       });
       expect(response.statusCode).toBe(409);
@@ -452,6 +479,7 @@ describe('vault items CRUD', () => {
           revision: 2,
           encrypted_data: b64(new Uint8Array(40).fill(7)),
           nonce: item.nonce,
+          manifest: PLACEHOLDER_MANIFEST,
         },
       });
       expect(response.statusCode).toBe(409);
@@ -470,7 +498,12 @@ describe('vault items CRUD', () => {
         method: 'PUT',
         url: `/vault-items/${a.id}`,
         headers: bearer(token),
-        payload: { revision: 2, encrypted_data: b64(new Uint8Array(40).fill(7)), nonce: b.nonce },
+        payload: {
+          revision: 2,
+          encrypted_data: b64(new Uint8Array(40).fill(7)),
+          nonce: b.nonce,
+          manifest: PLACEHOLDER_MANIFEST,
+        },
       });
       expect(response.statusCode).toBe(409);
       expect(response.json().message).toMatch(/nonce/);
@@ -483,7 +516,7 @@ describe('vault items CRUD', () => {
         'pw-nonce-retry',
       );
       const item = await createItem(ctx.app, token, user.vaultKey, '{"n":1}');
-      const payload = await updatePayload('{"n":2}', user.vaultKey, item);
+      const payload = await updatePayload('{"n":2}', user.vaultKey, item, { app: ctx.app, token });
       for (let attempt = 0; attempt < 2; attempt++) {
         const response = await ctx.app.inject({
           method: 'PUT',
@@ -508,7 +541,7 @@ describe('vault items CRUD', () => {
       url: '/vault-items',
       headers: malloryHeaders,
     });
-    expect(list.json()).toEqual({ items: [] });
+    expect(list.json()).toEqual({ items: [], manifest: null });
 
     const put = await ctx.app.inject({
       method: 'PUT',
@@ -526,14 +559,11 @@ describe('vault items CRUD', () => {
         id: item.id,
         revision: 1,
         ...(await encryptedItemPayload('{"pwned":true}', mallory.user.vaultKey, bindingOf(item))),
+        manifest: PLACEHOLDER_MANIFEST,
       },
     });
     expect(post.statusCode).toBe(409);
-    const del = await ctx.app.inject({
-      method: 'DELETE',
-      url: `/vault-items/${item.id}`,
-      headers: malloryHeaders,
-    });
+    const del = await deleteItem(ctx.app, mallory.token, mallory.user.vaultKey, item.id);
     expect(del.statusCode).toBe(404);
 
     const vaultKey = await ctx.app.inject({
@@ -572,7 +602,9 @@ describe('item revisions', () => {
     const put = (payload: object) =>
       ctx.app.inject({ method: 'PUT', url: `/vault-items/${item.id}`, headers, payload });
 
-    const second = await put(await updatePayload('{"n":2}', user.vaultKey, item));
+    const second = await put(
+      await updatePayload('{"n":2}', user.vaultKey, item, { app: ctx.app, token }),
+    );
     expect(second.statusCode, second.body).toBe(200);
 
     // A client that loaded revision 1 tries to save its own revision 2.
@@ -603,7 +635,12 @@ describe('item revisions', () => {
       method: 'PUT',
       url: `/vault-items/${id}`,
       headers: bearer(token),
-      payload: await updatePayload('{"n":1}', user.vaultKey, { id, revision: 0 }),
+      payload: await updatePayload(
+        '{"n":1}',
+        user.vaultKey,
+        { id, revision: 0 },
+        { app: ctx.app, token },
+      ),
     });
     expect(response.statusCode, response.body).toBe(200);
     expect(response.json().revision).toBe(1);
@@ -620,6 +657,7 @@ describe('item revisions', () => {
         id: item.id,
         revision: 1,
         ...(await encryptedItemPayload('{"n":2}', user.vaultKey, bindingOf(item))),
+        manifest: PLACEHOLDER_MANIFEST,
       },
     });
     expect(response.statusCode).toBe(409);
@@ -758,11 +796,22 @@ describe('POST /account/password', () => {
   /** The client side of a password change: new keys, a new vault key, every item re-encrypted. */
   async function changePasswordBody(
     user: ClientUser,
+    token: string,
     newPassword: string,
     items: { item: ItemResponse; plaintext: string }[],
   ) {
     const next = await createClientUser(user.email, newPassword);
+    const current = await currentManifest(ctx.app, token, user.vaultKey);
+    const manifest = await encryptManifestBody(
+      nextManifest(
+        current,
+        { set: items.map(({ item }) => ({ id: item.id, revision: item.revision + 1 })) },
+        'test',
+      ),
+      next.vaultKey,
+    );
     const body = {
+      manifest,
       current_auth_hash: b64(user.authHash),
       auth_hash: b64(next.authHash),
       kdf_salt: b64(next.salt),
@@ -773,6 +822,7 @@ describe('POST /account/password', () => {
         items.map(async ({ item, plaintext }) => ({
           id: item.id,
           ...(await updatePayload(plaintext, next.vaultKey, item)),
+          manifest: undefined,
         })),
       ),
     };
@@ -797,7 +847,7 @@ describe('POST /account/password', () => {
     const a = await createItem(ctx.app, token, user.vaultKey, '{"n":"a"}');
     const b = await createItem(ctx.app, token, user.vaultKey, '{"n":"b"}');
 
-    const { next, body } = await changePasswordBody(user, 'pw-change-NEW', [
+    const { next, body } = await changePasswordBody(user, token, 'pw-change-NEW', [
       { item: b, plaintext: '{"n":"b"}' },
       { item: a, plaintext: '{"n":"a"}' },
     ]);
@@ -849,14 +899,14 @@ describe('POST /account/password', () => {
 
   it('works for an empty vault', async () => {
     const { user, token } = await registerAndLogin(ctx.app, 'change-empty@example.com', 'pw-e');
-    const { next, body } = await changePasswordBody(user, 'pw-e-NEW', []);
+    const { next, body } = await changePasswordBody(user, token, 'pw-e-NEW', []);
     expect((await changePassword(token, body)).statusCode).toBe(200);
     expect(await loginStatus(next)).toBe(200);
   });
 
   it('refuses a wrong current password with 403, and counts it toward the login lockout', async () => {
     const { user, token } = await registerAndLogin(ctx.app, 'change-wrong@example.com', 'pw-w');
-    const { body } = await changePasswordBody(user, 'pw-w-NEW', []);
+    const { body } = await changePasswordBody(user, token, 'pw-w-NEW', []);
     const wrong = { ...body, current_auth_hash: b64(new Uint8Array(32).fill(9)) };
 
     const first = await changePassword(token, wrong);
@@ -879,7 +929,7 @@ describe('POST /account/password', () => {
       { item: a, plaintext: 'a' },
       { item: b, plaintext: 'b' },
     ];
-    const { body } = await changePasswordBody(user, 'pw-409-NEW', both);
+    const { body } = await changePasswordBody(user, token, 'pw-409-NEW', both);
     const [itemA, itemB] = body.items;
 
     const cases = {
@@ -906,11 +956,331 @@ describe('POST /account/password', () => {
 
   it('rejects KDF params below the floor', async () => {
     const { user, token } = await registerAndLogin(ctx.app, 'change-kdf@example.com', 'pw-kdf');
-    const { body } = await changePasswordBody(user, 'pw-kdf-NEW', []);
+    const { body } = await changePasswordBody(user, token, 'pw-kdf-NEW', []);
     const response = await changePassword(token, {
       ...body,
       kdf_params: { ...body.kdf_params, memoryCost: 1024 },
     });
     expect(response.statusCode).toBe(400);
+  });
+});
+
+describe('vault manifest', () => {
+  const vault = async (token: string) =>
+    (await ctx.app.inject({ method: 'GET', url: '/vault-items', headers: bearer(token) })).json<{
+      items: ItemResponse[];
+      manifest: { version: number; encrypted_data: string; nonce: string } | null;
+    }>();
+
+  it('moves to the next version with every item write, and stores it as sent', async () => {
+    const { user, token } = await registerAndLogin(ctx.app, 'manifest@example.com', 'pw-m');
+    expect((await vault(token)).manifest).toBeNull();
+
+    const a = await createItem(ctx.app, token, user.vaultKey, '{"n":"a"}');
+    const b = await createItem(ctx.app, token, user.vaultKey, '{"n":"b"}');
+    const put = await ctx.app.inject({
+      method: 'PUT',
+      url: `/vault-items/${a.id}`,
+      headers: bearer(token),
+      payload: await updatePayload('{"n":"a2"}', user.vaultKey, a, { app: ctx.app, token }),
+    });
+    expect(put.statusCode, put.body).toBe(200);
+    expect((await deleteItem(ctx.app, token, user.vaultKey, b.id)).statusCode).toBe(204);
+
+    const { manifest } = await vault(token);
+    expect(manifest!.version).toBe(4);
+    const decrypted = await decryptManifest(
+      unb64(manifest!.encrypted_data),
+      unb64(manifest!.nonce),
+      user.vaultKey,
+      manifest!.version,
+    );
+    expect(decrypted.items).toEqual({ [a.id]: 2 });
+  });
+
+  it('refuses a write whose manifest is not the next version, and then changes nothing', async () => {
+    const { user, token } = await registerAndLogin(ctx.app, 'manifest-409@example.com', 'pw-m');
+    await createItem(ctx.app, token, user.vaultKey, '{"n":"a"}');
+    const stale = await encryptManifestBody(
+      nextManifest(null, { set: [{ id: randomUUID(), revision: 1 }] }, 'test'),
+      user.vaultKey,
+    );
+    const id = randomUUID();
+    const response = await ctx.app.inject({
+      method: 'POST',
+      url: '/vault-items',
+      headers: bearer(token),
+      payload: {
+        id,
+        revision: 1,
+        ...(await encryptedItemPayload('{}', user.vaultKey, { itemId: id, revision: 1 })),
+        manifest: stale, // version 1, but the vault is at 1 already
+      },
+    });
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toMatchObject({ manifest_version: 1 });
+    // The item wasn't stored either: writes are all-or-nothing.
+    expect((await vault(token)).items.map((item) => item.id)).not.toContain(id);
+  });
+
+  it('PUT /vault-manifest writes a first manifest for an existing vault', async () => {
+    const { user, token } = await registerAndLogin(ctx.app, 'manifest-init@example.com', 'pw-m');
+    const put = (manifest: object) =>
+      ctx.app.inject({
+        method: 'PUT',
+        url: '/vault-manifest',
+        headers: bearer(token),
+        payload: manifest,
+      });
+    const first = await manifestFor(ctx.app, token, user.vaultKey, {});
+    expect((await put(first)).statusCode).toBe(204);
+    expect((await put(first)).statusCode).toBe(409);
+    expect((await vault(token)).manifest!.version).toBe(1);
+  });
+
+  it("is never another user's", async () => {
+    const alice = await registerAndLogin(ctx.app, 'manifest-a@example.com', 'pw-a');
+    const bob = await registerAndLogin(ctx.app, 'manifest-b@example.com', 'pw-b');
+    await createItem(ctx.app, alice.token, alice.user.vaultKey, '{}');
+    expect((await vault(bob.token)).manifest).toBeNull();
+  });
+});
+
+describe('two-factor login', () => {
+  async function enableTwoFactor(email: string) {
+    const { user, token } = await registerAndLogin(ctx.app, email, 'pw-2fa');
+    const setup = await ctx.app.inject({
+      method: 'POST',
+      url: '/account/totp/setup',
+      headers: bearer(token),
+    });
+    expect(setup.statusCode, setup.body).toBe(200);
+    const { secret, otpauth_uri } = setup.json<{ secret: string; otpauth_uri: string }>();
+    expect(otpauth_uri).toContain(`secret=${secret}`);
+    const enable = await ctx.app.inject({
+      method: 'POST',
+      url: '/account/totp/enable',
+      headers: bearer(token),
+      payload: { current_auth_hash: b64(user.authHash), totp_code: totpCode(secret) },
+    });
+    expect(enable.statusCode, enable.body).toBe(200);
+    const recoveryCodes = enable.json<{ recovery_codes: string[] }>().recovery_codes;
+    // The code just used can't log in; wait for the next step instead of sleeping.
+    await ctx.pool.query('UPDATE users SET totp_last_step = totp_last_step - 1 WHERE email = $1', [
+      email,
+    ]);
+    return { user, token, secret, recoveryCodes };
+  }
+
+  const loginWith = (user: ClientUser, extra: Record<string, string> = {}) =>
+    ctx.app.inject({
+      method: 'POST',
+      url: '/login',
+      payload: { email: user.email, auth_hash: b64(user.authHash), ...extra },
+    });
+
+  it('is set up with a code from the app, and reported by GET /account', async () => {
+    const { token, recoveryCodes } = await enableTwoFactor('2fa-setup@example.com');
+    expect(recoveryCodes).toHaveLength(10);
+    const account = await ctx.app.inject({
+      method: 'GET',
+      url: '/account',
+      headers: bearer(token),
+    });
+    expect(account.json()).toMatchObject({
+      email: '2fa-setup@example.com',
+      totp_enabled: true,
+      recovery_codes_remaining: 10,
+    });
+    const again = await ctx.app.inject({
+      method: 'POST',
+      url: '/account/totp/setup',
+      headers: bearer(token),
+    });
+    expect(again.statusCode).toBe(409);
+  });
+
+  it('refuses to turn on with a wrong code or without the master password', async () => {
+    const { user, token } = await registerAndLogin(ctx.app, '2fa-wrong@example.com', 'pw');
+    const { secret } = (
+      await ctx.app.inject({ method: 'POST', url: '/account/totp/setup', headers: bearer(token) })
+    ).json();
+    const enable = (payload: object) =>
+      ctx.app.inject({
+        method: 'POST',
+        url: '/account/totp/enable',
+        headers: bearer(token),
+        payload,
+      });
+    const wrongCode = String((Number(totpCode(secret)) + 1) % 1_000_000).padStart(6, '0');
+    expect(
+      (await enable({ current_auth_hash: b64(user.authHash), totp_code: wrongCode })).statusCode,
+    ).toBe(403);
+    expect(
+      (
+        await enable({
+          current_auth_hash: b64(new Uint8Array(32).fill(5)),
+          totp_code: totpCode(secret),
+        })
+      ).statusCode,
+    ).toBe(403);
+    expect((await loginWith(user)).statusCode).toBe(200);
+  });
+
+  it('asks for a code only after the password is right, without using up an attempt', async () => {
+    const { user } = await enableTwoFactor('2fa-login@example.com');
+    const wrongPassword = await ctx.app.inject({
+      method: 'POST',
+      url: '/login',
+      payload: { email: user.email, auth_hash: b64(new Uint8Array(32).fill(1)) },
+    });
+    expect(wrongPassword.statusCode).toBe(401);
+    expect(wrongPassword.json()).not.toHaveProperty('totp_required');
+
+    for (let i = 0; i < 6; i++) {
+      const response = await loginWith(user);
+      expect(response.statusCode).toBe(401);
+      expect(response.json()).toMatchObject({ totp_required: true });
+    }
+    // Still 4 attempts left: only the wrong password counted.
+    const wrongCode = await loginWith(user, { totp_code: '000000' });
+    expect(wrongCode.json()).toMatchObject({ totp_required: true, attempts_remaining: 3 });
+  });
+
+  it('logs in with the current code, once', async () => {
+    const { user, secret } = await enableTwoFactor('2fa-code@example.com');
+    const code = totpCode(secret);
+    expect((await loginWith(user, { totp_code: code })).statusCode).toBe(200);
+    const replay = await loginWith(user, { totp_code: code });
+    expect(replay.statusCode).toBe(401);
+    expect(replay.json()).toMatchObject({ totp_required: true });
+  });
+
+  it('logs in with a recovery code, once, in any case or spacing', async () => {
+    const { user, token, recoveryCodes } = await enableTwoFactor('2fa-recovery@example.com');
+    const code = recoveryCodes[0]!;
+    expect(
+      (await loginWith(user, { recovery_code: code.toLowerCase().replace('-', ' ') })).statusCode,
+    ).toBe(200);
+    expect((await loginWith(user, { recovery_code: code })).statusCode).toBe(401);
+    const account = await ctx.app.inject({
+      method: 'GET',
+      url: '/account',
+      headers: bearer(token),
+    });
+    expect(account.json().recovery_codes_remaining).toBe(9);
+  });
+
+  it('counts wrong codes toward the lockout', async () => {
+    const { user, secret } = await enableTwoFactor('2fa-lockout@example.com');
+    for (let i = 0; i < 5; i++) {
+      expect((await loginWith(user, { totp_code: '000000' })).statusCode).toBe(401);
+    }
+    expect((await loginWith(user, { totp_code: totpCode(secret) })).statusCode).toBe(429);
+  });
+
+  it('turns off only with the master password and a code', async () => {
+    const { user, token, secret } = await enableTwoFactor('2fa-off@example.com');
+    const disable = (payload: object) =>
+      ctx.app.inject({
+        method: 'POST',
+        url: '/account/totp/disable',
+        headers: bearer(token),
+        payload,
+      });
+    const withoutCode = await disable({ current_auth_hash: b64(user.authHash) });
+    expect(withoutCode.statusCode).toBe(403);
+    expect(withoutCode.json()).toMatchObject({ totp_required: true });
+    expect(
+      (await disable({ current_auth_hash: b64(user.authHash), totp_code: totpCode(secret) }))
+        .statusCode,
+    ).toBe(204);
+    expect((await loginWith(user)).statusCode).toBe(200);
+    const { rows } = await ctx.pool.query(
+      `SELECT 1 FROM totp_recovery_codes WHERE user_id = (SELECT id FROM users WHERE email = $1)`,
+      [user.email],
+    );
+    expect(rows).toEqual([]);
+  });
+
+  it('issues new recovery codes, replacing the old ones', async () => {
+    const { user, token, secret, recoveryCodes } = await enableTwoFactor('2fa-regen@example.com');
+    const response = await ctx.app.inject({
+      method: 'POST',
+      url: '/account/totp/recovery-codes',
+      headers: bearer(token),
+      payload: { current_auth_hash: b64(user.authHash), totp_code: totpCode(secret) },
+    });
+    expect(response.statusCode, response.body).toBe(200);
+    const fresh = response.json<{ recovery_codes: string[] }>().recovery_codes;
+    expect(fresh).toHaveLength(10);
+    expect((await loginWith(user, { recovery_code: recoveryCodes[0]! })).statusCode).toBe(401);
+    expect((await loginWith(user, { recovery_code: fresh[0]! })).statusCode).toBe(200);
+  });
+});
+
+describe('DELETE /account', () => {
+  const remove = (token: string, payload: object) =>
+    ctx.app.inject({ method: 'DELETE', url: '/account', headers: bearer(token), payload });
+
+  it('deletes the account and everything in it, after checking the password', async () => {
+    const { user, token } = await registerAndLogin(ctx.app, 'delete-me@example.com', 'pw-del');
+    await createItem(ctx.app, token, user.vaultKey, '{"n":1}');
+    const bystander = await registerAndLogin(ctx.app, 'delete-bystander@example.com', 'pw-b');
+
+    expect((await remove(token, { current_auth_hash: b64(new Uint8Array(32)) })).statusCode).toBe(
+      403,
+    );
+    expect((await remove(token, { current_auth_hash: b64(user.authHash) })).statusCode).toBe(204);
+
+    const status = await ctx.app.inject({
+      method: 'GET',
+      url: '/vault-items',
+      headers: bearer(token),
+    });
+    expect(status.statusCode).toBe(401);
+    const login = await ctx.app.inject({
+      method: 'POST',
+      url: '/login',
+      payload: { email: user.email, auth_hash: b64(user.authHash) },
+    });
+    expect(login.statusCode).toBe(401);
+    const { rows } = await ctx.pool.query(
+      `SELECT (SELECT count(*) FROM users WHERE email = $1)::int AS users,
+              (SELECT count(*) FROM vault_items v JOIN users u ON u.id = v.user_id
+                WHERE u.email = $2)::int AS bystander_items`,
+      [user.email, bystander.user.email],
+    );
+    expect(rows[0]).toEqual({ users: 0, bystander_items: 0 });
+    expect(
+      (
+        await ctx.app.inject({
+          method: 'GET',
+          url: '/vault-items',
+          headers: bearer(bystander.token),
+        })
+      ).statusCode,
+    ).toBe(200);
+  });
+
+  it('also needs a two-factor code when two-factor is on', async () => {
+    const { user, token } = await registerAndLogin(ctx.app, 'delete-2fa@example.com', 'pw');
+    const { secret } = (
+      await ctx.app.inject({ method: 'POST', url: '/account/totp/setup', headers: bearer(token) })
+    ).json();
+    await ctx.app.inject({
+      method: 'POST',
+      url: '/account/totp/enable',
+      headers: bearer(token),
+      payload: { current_auth_hash: b64(user.authHash), totp_code: totpCode(secret) },
+    });
+    const withoutCode = await remove(token, { current_auth_hash: b64(user.authHash) });
+    expect(withoutCode.statusCode).toBe(403);
+    expect(withoutCode.json()).toMatchObject({ totp_required: true });
+    await ctx.pool.query('UPDATE users SET totp_last_step = 0 WHERE email = $1', [user.email]);
+    expect(
+      (await remove(token, { current_auth_hash: b64(user.authHash), totp_code: totpCode(secret) }))
+        .statusCode,
+    ).toBe(204);
   });
 });

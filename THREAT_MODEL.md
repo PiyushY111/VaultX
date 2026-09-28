@@ -47,8 +47,8 @@ all traffic that reaches the server.
   HKDF outputs (DESIGN.md explains why).
 - AEAD (XChaCha20-Poly1305) on every item and on the wrapped vault key: the
   server can't modify ciphertext without decryption failing on the client.
-  The web vault reports undecryptable items as possibly tampered with; the
-  extension skips them (it doesn't yet surface a warning).
+  Both the web vault and the extension hide undecryptable items and warn
+  that they may have been tampered with.
 - KDF downgrade protection: clients refuse `kdf_params` below the floor
   (19 MiB / 2 passes), so the server can't make offline guessing cheaper by
   serving weak parameters at login.
@@ -73,9 +73,15 @@ all traffic that reaches the server.
   (ciphertext length = plaintext length + 16), timestamps and access
   patterns are all visible.
 - **Availability and integrity of the vault as a whole.** The operator can
-  delete or withhold items, refuse writes, or serve an old copy of the vault
-  to a device that hasn't seen a newer one (see §7). Swapping items or
-  passing off old ciphertexts as current is detected.
+  refuse writes or delete the account. Hiding, adding, swapping or rolling
+  back individual items is detected on any device (the vault manifest, §7).
+  What it can still do is serve a whole, consistent older copy of the vault
+  to a device that hasn't seen a newer one; the vault shows when it last
+  changed, so a person can notice.
+- **The two-factor secret is on the server.** It has to be, to check codes.
+  An operator (or database thief) who has it can generate codes, so
+  two-factor doesn't protect against the operator. It protects the vault's
+  ciphertext from someone who only has the password or auth hash.
 - **Session metadata.** The session list stores each login's user agent and
   when it was last used.
 
@@ -118,6 +124,12 @@ control the running server.
   context, so passwords built from common words, keyboard patterns, dates or
   the user's own address are refused. Item passwords get the same meter as
   advice only.
+- **Two-factor login (TOTP):** users can require a 6-digit code from an
+  authenticator app, with ten one-time recovery codes (stored as hashes).
+  The server only mentions it after the password checks out, so it reveals
+  nothing to someone without the password. Wrong codes count toward the
+  per-account lockout, each code works once, and turning it off, getting new
+  recovery codes or deleting the account needs the password and a code.
 - **Master password change** re-derives everything from a new password and
   rotates the vault key, re-encrypting every item (see §7 for why rotation,
   not just re-wrapping). Other sessions are ended.
@@ -141,9 +153,10 @@ control the running server.
   they captured the old wrapped vault key or item ciphertexts, the old
   password still opens those copies; rotation protects everything saved
   afterwards.
-- **No second factor.** A captured auth hash, or a guessed password, is
-  enough to log in. (A second factor would protect server access to the
-  ciphertext, not the offline attack.)
+- **Two-factor login is optional**, and protects server access to the
+  ciphertext, not the offline attack: someone with a database copy can guess
+  passwords against it whether or not two-factor is on. TOTP codes can also
+  be phished in real time, like any code a person types in.
 - **Lockout as denial of service.** Anyone who knows an email can trigger
   that account's 15-minute lockout, and keep re-triggering it. That's the
   inherent trade-off of per-account limits. The lockout is short, never
@@ -316,30 +329,35 @@ Replaying or rearranging previously valid ciphertexts or credentials.
   ciphertext as a **newer revision**: decryption fails, and the web vault
   reports the item as tampered with. The server accepts only the next
   revision, so revision numbers are never reused.
-- **Rollback is caught on devices that have seen the item.** Each client
-  remembers the highest revision it has seen per item (and which items it
-  deleted). An item served at an older revision, or a deleted item that
-  reappears, is hidden and reported as rolled back.
+- **The vault manifest.** The client keeps an encrypted list of every item
+  id and revision (bound to its own version number in the AAD), and every
+  write moves it to the next version in the same transaction as the item
+  change. Only a holder of the vault key can write one, so a client checking
+  the items it's served against it catches, **on any device, even one that
+  has never seen the vault**: hidden items, added or resurrected items, and
+  items at another revision (rolled back). All are hidden and reported, in
+  the web vault and the extension.
+- **Rollback is also caught per device.** Each client remembers the highest
+  manifest version and item revisions it has seen, so it also notices an
+  older copy of the whole vault.
 - **Password change rotates the vault key**, so an attacker who unwrapped
   the old vault key with a stolen password can't read anything saved
   afterwards, and can't forge new items.
 
 **Not solved**
 
-- **Rollback on a device that has never seen the vault.** The revision
-  ledger lives in each browser. A new device, a cleared browser profile, or
-  a private window has no ledger, so the server can serve it an old but
-  genuine revision of any item, or a whole stale copy of the vault, without
-  it noticing. A signed, client-verifiable vault manifest would close this;
-  it isn't implemented.
-- **Withholding items.** The server can hide items (or refuse writes).
-  Clients can't tell an item the server withholds from one deleted on
-  another device. A deleted item that reappears is caught by the ledger on
-  devices that saw it deleted.
-- **Legacy items (revision 0)** from before binding use the old, unbound
-  format until a client re-saves them. The web vault does so on load; until
-  then, or on a device without a ledger, they can be swapped or rolled back
-  as before.
+- **A whole older copy, on a fresh device.** A server can replay an entire
+  earlier state (old manifest plus the matching old items) to a device with
+  no history (a new device, cleared profile, or private window). It's
+  internally consistent, so nothing can prove it's not the latest. The web
+  vault shows when and from which app the vault last changed, so a person
+  who changed it since can notice. Devices that have seen a newer version
+  catch it.
+- **Trust on first use for the first manifest.** Vaults from before the
+  manifest existed get their first one from whichever client loads them
+  first, based on what that client could verify. Items saved before
+  revision binding (revision 0) use the old, unbound format until a client
+  re-saves them (the web vault does so on load).
 - **Auth-hash replay.** A captured auth hash (from an unencrypted connection
   or a compromised client) works as a login credential until the password
   is changed. It still doesn't decrypt anything.
@@ -352,7 +370,11 @@ Replaying or rearranging previously valid ciphertexts or credentials.
 
 - Compromised operating systems, browsers, or hardware.
 - Account recovery. A forgotten master password means the vault is
-  unrecoverable, by design.
+  unrecoverable, by design. The emergency kit (offered at signup and on the
+  Security page) is a printable reminder of where the vault lives, with a
+  blank for writing the password by hand; it never contains the password.
+- Deleting an account removes it and every item from the database right
+  away. Copies in the operator's backups are the operator's responsibility.
 - Multi-user sharing, per-item keys, and mobile clients (see README →
   Future Work).
 - Side channels in libsodium or the JavaScript runtime beyond using

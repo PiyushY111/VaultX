@@ -2,7 +2,7 @@ import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import sodium from 'libsodium-wrappers-sumo';
-import { installFakeServer, type FakeServer } from '../test/fakeServer';
+import { FAKE_TOTP_CODE, installFakeServer, type FakeServer } from '../test/fakeServer';
 import { App } from './App';
 import { toBase64 } from './lib/base64';
 import { CLIPBOARD_CLEAR_MS } from './lib/clipboard';
@@ -110,7 +110,7 @@ describe('signup → add item → lock → unlock', () => {
     // ledger, which holds item ids and revision numbers.
     expect(Object.keys(localStorage)).toEqual([revisionStorageKey(EMAIL)]);
     const ledger = JSON.parse(localStorage.getItem(revisionStorageKey(EMAIL))!);
-    expect(Object.entries(ledger)).toEqual([[stored[0]!.id, 1]]);
+    expect(ledger).toEqual({ [stored[0]!.id]: 1, '#manifest': 2 });
     expect(Object.keys(sessionStorage)).toEqual([]);
 
     // Wrong password stays locked.
@@ -371,11 +371,17 @@ describe('item revisions', () => {
       updated_at: new Date().toISOString(),
     });
 
+    // As on an account from before manifests existed: none on the server, none seen here.
+    server.users.get('alice@example.com')!.manifest = null;
+    localStorage.clear();
+
     await unlock(user, PASSWORD);
     expect(
       await screen.findByRole('listitem', { name: legacyItem.site }, { timeout: 10_000 }),
     ).toBeInTheDocument();
     await waitFor(() => expect(server.items.get(id)!.revision).toBe(1));
+    // It's in the vault's new manifest, so the next load is clean.
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
   it('reloads instead of overwriting an item that changed elsewhere', async () => {
@@ -389,5 +395,101 @@ describe('item revisions', () => {
     await user.type(within(form).getByLabelText('Notes'), ' (edited)');
     await user.click(within(form).getByRole('button', { name: 'Save' }));
     expect(await within(form).findByRole('alert')).toHaveTextContent(/changed elsewhere/);
+  });
+});
+
+describe('emergency kit', () => {
+  it('is offered right after signup, without the master password in it', async () => {
+    const user = userEvent.setup();
+    await signUpAndAddItem(user);
+    const kit = screen.getByRole('region', { name: 'Emergency kit' });
+    expect(within(kit).getByText(/VAULTX EMERGENCY KIT/)).toHaveTextContent(EMAIL);
+    expect(kit.textContent).not.toContain(PASSWORD);
+
+    const createObjectURL = vi.fn(() => 'blob:kit');
+    Object.assign(URL, { createObjectURL, revokeObjectURL: vi.fn() });
+    await user.click(within(kit).getByRole('button', { name: 'Download' }));
+    const blob = (createObjectURL.mock.calls[0] as unknown as [Blob])[0];
+    expect(await blob.text()).toContain(EMAIL);
+
+    await user.click(within(kit).getByRole('button', { name: 'I’ve saved it' }));
+    expect(screen.queryByRole('region', { name: 'Emergency kit' })).not.toBeInTheDocument();
+  });
+});
+
+describe('two-factor login', () => {
+  async function turnOnTwoFactor(user: User) {
+    await user.click(screen.getByRole('button', { name: 'Security' }));
+    const section = screen.getByRole('region', { name: 'Two-factor login' });
+    await user.click(
+      await within(section).findByRole('button', { name: 'Set up two-factor login' }),
+    );
+    const form = await within(section).findByRole('form', { name: 'Set up two-factor login' });
+    expect(within(form).getByRole('img', { name: /QR code/ })).toBeInTheDocument();
+    await user.type(within(form).getByLabelText('Code from the app'), FAKE_TOTP_CODE);
+    await user.type(within(form).getByLabelText('Master password'), PASSWORD);
+    await user.click(within(form).getByRole('button', { name: 'Turn on two-factor login' }));
+    const codes = await within(section).findByRole(
+      'region',
+      { name: 'Recovery codes' },
+      { timeout: 10_000 },
+    );
+    const list = within(codes)
+      .getAllByRole('listitem')
+      .map((li) => li.textContent!);
+    expect(list).toHaveLength(10);
+    await user.click(within(codes).getByRole('button', { name: 'I’ve saved them' }));
+    expect(await within(section).findByRole('status')).toHaveTextContent(
+      'Two-factor login is on. 10 recovery codes left.',
+    );
+    return list;
+  }
+
+  it('is set up from Security, then asked for after the password', async () => {
+    const user = userEvent.setup();
+    await signUpAndAddItem(user);
+    const recoveryCodes = await turnOnTwoFactor(user);
+
+    await user.click(screen.getByRole('button', { name: 'Lock now' }));
+    await unlock(user, PASSWORD);
+    const form = await screen.findByRole('form', { name: 'Two-factor code' }, { timeout: 10_000 });
+    await user.type(within(form).getByLabelText('Authentication code'), '000000');
+    await user.click(within(form).getByRole('button', { name: 'Verify' }));
+    expect(await within(form).findByRole('alert')).toHaveTextContent(/incorrect/);
+
+    await user.click(within(form).getByRole('button', { name: 'Use a recovery code' }));
+    await user.type(within(form).getByLabelText('Recovery code'), recoveryCodes[0]!);
+    await user.click(within(form).getByRole('button', { name: 'Verify' }));
+    expect(
+      await screen.findByRole('listitem', { name: ITEM.site }, { timeout: 10_000 }),
+    ).toBeInTheDocument();
+  });
+});
+
+describe('delete account', () => {
+  it('deletes everything after the email and master password are confirmed', async () => {
+    const user = userEvent.setup();
+    await signUpAndAddItem(user);
+    await user.click(screen.getByRole('button', { name: 'Security' }));
+    const form = screen.getByRole('form', { name: 'Delete account' });
+
+    await user.type(within(form).getByLabelText('Type your email to confirm'), 'wrong@example.com');
+    await user.type(within(form).getByLabelText('Master password'), PASSWORD);
+    await user.click(within(form).getByRole('button', { name: 'Delete account permanently' }));
+    expect(within(form).getByRole('alert')).toHaveTextContent('Type your email exactly');
+    expect(server.users.size).toBe(1);
+
+    await user.clear(within(form).getByLabelText('Type your email to confirm'));
+    await user.type(within(form).getByLabelText('Type your email to confirm'), EMAIL);
+    await user.clear(within(form).getByLabelText('Master password'));
+    await user.type(within(form).getByLabelText('Master password'), PASSWORD);
+    await user.click(within(form).getByRole('button', { name: 'Delete account permanently' }));
+    expect(
+      await screen.findByRole('heading', { name: 'Log in' }, { timeout: 10_000 }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent('were deleted');
+    expect(server.users.size).toBe(0);
+    expect(server.items.size).toBe(0);
+    expect(Object.keys(localStorage)).toEqual([]);
   });
 });

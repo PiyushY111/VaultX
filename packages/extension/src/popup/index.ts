@@ -11,6 +11,7 @@ import type {
   Response,
   Settings,
   VaultState,
+  VaultWarnings,
 } from '../shared/messages';
 
 // The popup is a trusted extension page, but item fields (e.g. a site name
@@ -24,6 +25,8 @@ class RequestError extends Error {
   constructor(
     message: string,
     readonly locked: boolean,
+    /** The password was right and a two-factor code is needed next. */
+    readonly secondFactor = false,
   ) {
     super(message);
   }
@@ -31,7 +34,13 @@ class RequestError extends Error {
 
 async function send<T>(request: PopupRequest): Promise<T> {
   const response = (await chrome.runtime.sendMessage(request)) as Response<T>;
-  if (!response.ok) throw new RequestError(response.error, response.locked === true);
+  if (!response.ok) {
+    throw new RequestError(
+      response.error,
+      response.locked === true,
+      response.secondFactor === true,
+    );
+  }
   return response.data;
 }
 
@@ -124,6 +133,10 @@ function renderUnlock(state: VaultState, message?: string): void {
           await send({ type: 'unlock', email: email.value, password: submitted });
           await render();
         } catch (err) {
+          if (err instanceof RequestError && err.secondFactor) {
+            renderSecondFactor(state);
+            return;
+          }
           error.textContent = errorText(err);
           submit.disabled = false;
           submit.textContent = 'Unlock';
@@ -164,10 +177,112 @@ function renderUnlock(state: VaultState, message?: string): void {
   (state.email ? password : email).focus();
 }
 
+/** The second step of unlocking when the account has two-factor login on. */
+function renderSecondFactor(state: VaultState): void {
+  let recovery = false;
+  const code = h('input', {
+    name: 'code',
+    required: true,
+    autocomplete: 'one-time-code',
+    inputmode: 'numeric',
+  });
+  const label = h('label', {}, 'Authentication code', code);
+  const hint = h('p', { class: 'muted' }, 'Enter the 6-digit code from your authenticator app.');
+  const error = h('p', { class: 'error', role: 'alert' });
+  const submit = h('button', { type: 'submit', class: 'btn btn-primary' }, 'Verify');
+  const toggle = h(
+    'button',
+    {
+      type: 'button',
+      class: 'btn btn-quiet',
+      onclick: () => {
+        recovery = !recovery;
+        label.firstChild!.textContent = recovery ? 'Recovery code' : 'Authentication code';
+        hint.textContent = recovery
+          ? 'Enter one of your recovery codes. Each one works once.'
+          : 'Enter the 6-digit code from your authenticator app.';
+        code.setAttribute('inputmode', recovery ? 'text' : 'numeric');
+        toggle.textContent = recovery ? 'Use my authenticator app' : 'Use a recovery code';
+        code.value = '';
+        code.focus();
+      },
+    },
+    'Use a recovery code',
+  );
+
+  mount(
+    h('header', { class: 'topbar' }, emblem('mark'), h('h1', { class: 'brand' }, 'VaultX')),
+    h(
+      'form',
+      {
+        class: 'panel',
+        'aria-label': 'Two-factor code',
+        onsubmit: async (event: Event) => {
+          event.preventDefault();
+          submit.disabled = true;
+          submit.textContent = 'Checking…';
+          error.textContent = '';
+          try {
+            await send({ type: 'unlockSecondFactor', code: code.value, recovery });
+            await render();
+          } catch (err) {
+            error.textContent = errorText(err);
+            submit.disabled = false;
+            submit.textContent = 'Verify';
+            code.value = '';
+            code.focus();
+          }
+        },
+      },
+      h('h2', { class: 'title' }, 'Two-factor code'),
+      hint,
+      label,
+      error,
+      h(
+        'div',
+        { class: 'row' },
+        submit,
+        toggle,
+        h(
+          'button',
+          { type: 'button', class: 'btn btn-quiet', onclick: () => renderUnlock(state) },
+          'Cancel',
+        ),
+      ),
+    ),
+  );
+  code.focus();
+}
+
+/** One line per kind of problem the vault's integrity checks found. */
+function warningMessages(w: VaultWarnings): string[] {
+  const messages: string[] = [];
+  if (w.failed)
+    messages.push(`${w.failed} login(s) couldn’t be decrypted and may have been tampered with.`);
+  if (w.rolledBack)
+    messages.push(
+      `${w.rolledBack} login(s) are older than a version already seen, so they’re hidden.`,
+    );
+  if (w.missing)
+    messages.push(`${w.missing} login(s) in your vault weren’t returned by the server.`);
+  if (w.unexpected)
+    messages.push(
+      `${w.unexpected} login(s) returned by the server aren’t part of your vault, so they’re hidden.`,
+    );
+  if (w.manifest === 'tampered')
+    messages.push('Your vault’s item list failed its integrity check.');
+  if (w.manifest === 'stale')
+    messages.push('The server returned an older copy of your vault than this browser has seen.');
+  if (w.manifest === 'missing') messages.push('Your vault’s item list is missing from the server.');
+  return messages;
+}
+
 // --- Vault -------------------------------------------------------------------
 
 async function renderVault(state: VaultState): Promise<void> {
   const status = h('p', { class: 'error', role: 'alert' });
+  const warnings = h('div', { class: 'warnings', role: 'alert', 'aria-label': 'Vault warnings' });
+  warnings.hidden = true;
   const search = h('input', {
     type: 'search',
     class: 'search',
@@ -204,6 +319,7 @@ async function renderVault(state: VaultState): Promise<void> {
       'div',
       { class: 'panel' },
       h('p', { class: 'muted' }, `Unlocked as ${state.email ?? ''}`),
+      warnings,
       status,
       matchesSection,
       h(
@@ -229,6 +345,14 @@ async function renderVault(state: VaultState): Promise<void> {
   let items: PopupItem[];
   try {
     items = await send<PopupItem[]>({ type: 'listItems' });
+    const messages = warningMessages(await send<VaultWarnings>({ type: 'getWarnings' }));
+    if (messages.length) {
+      warnings.hidden = false;
+      warnings.replaceChildren(
+        h('strong', {}, 'Your vault may have been tampered with'),
+        ...messages.map((message) => h('p', {}, message)),
+      );
+    }
   } catch (error) {
     onRequestError(error, (message) => (status.textContent = message));
     return;

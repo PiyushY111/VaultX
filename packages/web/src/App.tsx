@@ -6,13 +6,14 @@ import { VaultView } from './components/VaultView';
 import { useAutoLockSetting } from './lib/autoLockSetting';
 import { clearCopiedSecretNow } from './lib/clipboard';
 import { useAutoLock } from './lib/useAutoLock';
+import { revisionStorageKey } from './vault/revisionLedger';
 import { lockSession, type VaultSession } from './vault/session';
 
 type Screen =
   | { kind: 'login' }
   | { kind: 'signup' }
   | { kind: 'locked'; email: string }
-  | { kind: 'vault'; session: VaultSession };
+  | { kind: 'vault'; session: VaultSession; justSignedUp?: boolean };
 
 export function App() {
   const [screen, setScreen] = useState<Screen>({ kind: 'login' });
@@ -20,10 +21,10 @@ export function App() {
   const [autoLockMinutes, setAutoLockMinutes] = useAutoLockSetting();
   const sessionRef = useRef<VaultSession | null>(null);
 
-  const openVault = useCallback((session: VaultSession) => {
+  const openVault = useCallback((session: VaultSession, justSignedUp = false) => {
     sessionRef.current = session;
     setNotice(null);
-    setScreen({ kind: 'vault', session });
+    setScreen({ kind: 'vault', session, justSignedUp });
   }, []);
 
   // Wipes the vault key and token, ends the server session, clears a copied
@@ -49,6 +50,22 @@ export function App() {
     setScreen({ kind: 'login' });
   }, []);
 
+  const accountDeleted = useCallback(() => {
+    const session = sessionRef.current;
+    if (session) {
+      lockSession(session);
+      try {
+        localStorage.removeItem(revisionStorageKey(session.email));
+      } catch {
+        // Nothing to clean up.
+      }
+    }
+    clearCopiedSecretNow();
+    sessionRef.current = null;
+    setNotice('Your account and everything in your vault were deleted.');
+    setScreen({ kind: 'login' });
+  }, []);
+
   useAutoLock({
     enabled: screen.kind === 'vault',
     timeoutMs: autoLockMinutes * 60_000,
@@ -66,6 +83,8 @@ export function App() {
         onChangeAutoLock={setAutoLockMinutes}
         onLock={lock}
         onLogOut={logOut}
+        onAccountDeleted={accountDeleted}
+        justSignedUp={screen.justSignedUp ?? false}
       />
     );
   }
@@ -78,15 +97,21 @@ export function App() {
         </p>
       )}
       {screen.kind === 'login' && (
-        <LoginForm onUnlocked={openVault} onSwitchToSignup={() => setScreen({ kind: 'signup' })} />
+        <LoginForm
+          onUnlocked={(session) => openVault(session)}
+          onSwitchToSignup={() => setScreen({ kind: 'signup' })}
+        />
       )}
       {screen.kind === 'signup' && (
-        <SignupForm onSignedUp={openVault} onSwitchToLogin={() => setScreen({ kind: 'login' })} />
+        <SignupForm
+          onSignedUp={(session) => openVault(session, true)}
+          onSwitchToLogin={() => setScreen({ kind: 'login' })}
+        />
       )}
       {screen.kind === 'locked' && (
         <LoginForm
           lockedEmail={screen.email}
-          onUnlocked={openVault}
+          onUnlocked={(session) => openVault(session)}
           onSwitchToSignup={() => setScreen({ kind: 'signup' })}
           onSwitchAccount={() => {
             setNotice(null);

@@ -1,8 +1,32 @@
-import { decryptVaultKey, deriveKeys, deriveMasterKey } from '@password-manager/crypto';
+import {
+  DecryptionError,
+  checkAgainstManifest,
+  decryptManifest,
+  decryptVaultKey,
+  deriveKeys,
+  deriveMasterKey,
+  encryptManifest,
+  nextManifest,
+  type VaultManifest,
+} from '@password-manager/crypto';
 import { fromBase64, toBase64 } from '../shared/base64';
-import type { ItemSummary, PendingSavePrompt, PopupItem, Settings } from '../shared/messages';
+import type {
+  ItemSummary,
+  PendingSavePrompt,
+  PopupItem,
+  Settings,
+  VaultWarnings,
+} from '../shared/messages';
 import { securePageHost, siteMatchesHost } from '../shared/urls';
-import { ApiError, createApi, describeLoginFailure, type Api } from './api';
+import {
+  ApiError,
+  createApi,
+  describeLoginFailure,
+  needsSecondFactor,
+  type Api,
+  type ManifestPayload,
+  type SecondFactor,
+} from './api';
 import { decryptVaultItems, encryptVaultItem, type VaultItem, type VaultItemData } from './items';
 import { createRevisionLedger } from './revisions';
 import type { KeyValueStore } from './storage';
@@ -26,6 +50,36 @@ import type { KeyValueStore } from './storage';
  * browser restart) zeroes the in-memory key, clears session storage, and
  * ends the server session.
  */
+
+/** The password was right; the account needs a two-factor code ({@link Vault.unlockSecondFactor}). */
+export class SecondFactorRequiredError extends Error {
+  override name = 'SecondFactorRequiredError';
+}
+
+const NO_WARNINGS: VaultWarnings = {
+  failed: 0,
+  rolledBack: 0,
+  missing: 0,
+  unexpected: 0,
+  manifest: null,
+};
+
+const CLIENT_NAME = 'extension';
+/** How long a sign-in waits for its two-factor code. */
+const SECOND_FACTOR_TTL_MS = 5 * 60_000;
+
+/** A sign-in waiting for its two-factor code. Memory only: a worker restart means starting over. */
+interface PendingLogin {
+  email: string;
+  serverUrl: string;
+  api: Api;
+  stretchedMasterKey: Uint8Array;
+  authHash: Uint8Array;
+  expiresAt: number;
+}
+
+const isManifestConflict = (error: unknown) =>
+  error instanceof ApiError && error.status === 409 && 'manifest_version' in error.details;
 
 export class LockedError extends Error {
   constructor(message = 'Vault is locked') {
@@ -81,6 +135,10 @@ const wipe = (...buffers: Uint8Array[]) => buffers.forEach((buffer) => buffer.fi
 export class Vault {
   private active: ActiveSession | null = null;
   private items: VaultItem[] | null = null;
+  /** The manifest the next write builds on; loaded with the items. */
+  private manifest: VaultManifest | null = null;
+  private warnings: VaultWarnings = NO_WARNINGS;
+  private pendingLogin: PendingLogin | null = null;
 
   constructor(private readonly deps: VaultDeps) {}
 
@@ -126,7 +184,12 @@ export class Vault {
     return (await this.restore())?.email ?? null;
   }
 
-  /** Same flow as the web vault: derive keys locally, prove the authHash, unwrap the vault key. */
+  /**
+   * Same flow as the web vault: derive keys locally, prove the authHash,
+   * unwrap the vault key. Throws {@link SecondFactorRequiredError} if the
+   * account has two-factor on; the derived keys then wait in memory for
+   * {@link unlockSecondFactor}, so Argon2id doesn't run twice.
+   */
   async unlock(emailInput: string, password: string): Promise<void> {
     const email = emailInput.trim().toLowerCase();
     if (!email || !password) throw new Error('Email and master password are required');
@@ -136,36 +199,81 @@ export class Vault {
     const { kdf_salt, kdf_params } = await api.prelogin(email);
     // Rejects params below the crypto package's floor (KDF downgrade by a malicious server).
     const masterKey = await deriveMasterKey(password, fromBase64(kdf_salt), kdf_params);
-    const { stretchedMasterKey, authHash } = await deriveKeys(masterKey);
+    const keys = await deriveKeys(masterKey);
+    wipe(masterKey);
+    this.clearPendingLogin();
+    let handedOff = false;
     try {
-      let token: string;
-      try {
-        ({ token } = await api.login(email, toBase64(authHash)));
-      } catch (error) {
-        if (error instanceof ApiError && (error.status === 401 || error.status === 429)) {
-          throw new Error(describeLoginFailure(error), { cause: error });
-        }
-        throw error;
+      await this.finishUnlock(email, serverUrl, api, keys);
+    } catch (error) {
+      if (needsSecondFactor(error instanceof Error ? (error.cause ?? error) : error)) {
+        handedOff = true;
+        this.pendingLogin = {
+          email,
+          serverUrl,
+          api,
+          ...keys,
+          expiresAt: this.deps.now() + SECOND_FACTOR_TTL_MS,
+        };
+        throw new SecondFactorRequiredError((error as Error).message);
       }
-      const wrapped = await api.getVaultKey(token);
-      const vaultKey = await decryptVaultKey(
-        fromBase64(wrapped.encrypted_vault_key),
-        fromBase64(wrapped.vault_key_nonce),
-        stretchedMasterKey,
-      );
-
-      await this.lock();
-      this.active = { email, token, vaultKey, api };
-      await this.deps.session.set(SESSION_KEY, {
-        email,
-        token,
-        vaultKey: toBase64(vaultKey),
-        serverUrl,
-      } satisfies PersistedSession);
-      await this.touch();
+      throw error;
     } finally {
-      wipe(masterKey, stretchedMasterKey, authHash);
+      if (!handedOff) wipe(keys.stretchedMasterKey, keys.authHash);
     }
+  }
+
+  /** Completes a sign-in with a code from the authenticator app, or a recovery code. */
+  async unlockSecondFactor(code: string, recovery: boolean): Promise<void> {
+    const pending = this.pendingLogin;
+    if (!pending || pending.expiresAt <= this.deps.now()) {
+      this.clearPendingLogin();
+      throw new Error('This sign-in expired. Enter your master password again.');
+    }
+    const factor: SecondFactor = recovery
+      ? { recovery_code: code.trim() }
+      : { totp_code: code.trim() };
+    // A wrong code throws here and keeps the sign-in waiting for another try.
+    await this.finishUnlock(pending.email, pending.serverUrl, pending.api, pending, factor);
+  }
+
+  private clearPendingLogin(): void {
+    if (this.pendingLogin) wipe(this.pendingLogin.stretchedMasterKey, this.pendingLogin.authHash);
+    this.pendingLogin = null;
+  }
+
+  private async finishUnlock(
+    email: string,
+    serverUrl: string,
+    api: Api,
+    { stretchedMasterKey, authHash }: { stretchedMasterKey: Uint8Array; authHash: Uint8Array },
+    factor?: SecondFactor,
+  ): Promise<void> {
+    let token: string;
+    try {
+      ({ token } = await api.login(email, toBase64(authHash), factor));
+    } catch (error) {
+      if (error instanceof ApiError && (error.status === 401 || error.status === 429)) {
+        throw new Error(describeLoginFailure(error), { cause: error });
+      }
+      throw error;
+    }
+    const wrapped = await api.getVaultKey(token);
+    const vaultKey = await decryptVaultKey(
+      fromBase64(wrapped.encrypted_vault_key),
+      fromBase64(wrapped.vault_key_nonce),
+      stretchedMasterKey,
+    );
+
+    await this.lock(); // Also wipes a pending two-factor sign-in, which is done now.
+    this.active = { email, token, vaultKey, api };
+    await this.deps.session.set(SESSION_KEY, {
+      email,
+      token,
+      vaultKey: toBase64(vaultKey),
+      serverUrl,
+    } satisfies PersistedSession);
+    await this.touch();
   }
 
   async lock(): Promise<void> {
@@ -173,6 +281,9 @@ export class Vault {
     if (session) wipe(session.vaultKey);
     this.active = null;
     this.items = null;
+    this.manifest = null;
+    this.warnings = NO_WARNINGS;
+    this.clearPendingLogin();
     await this.deps.session.clear();
     // Unlocking logs in afresh, so the old server session would only linger.
     // Best effort, and not awaited: the vault is already locked.
@@ -199,15 +310,96 @@ export class Vault {
     return createRevisionLedger(this.deps.local, session.email);
   }
 
+  private async encryptManifestPayload(
+    manifest: VaultManifest,
+    vaultKey: Uint8Array,
+  ): Promise<ManifestPayload> {
+    const { ciphertext, nonce } = await encryptManifest(manifest, vaultKey);
+    return {
+      version: manifest.version,
+      encrypted_data: toBase64(ciphertext),
+      nonce: toBase64(nonce),
+    };
+  }
+
+  /**
+   * Loads and decrypts the vault, checking it against its manifest like the
+   * web vault does (see packages/web/src/vault/sync.ts). Items that fail to
+   * decrypt, are older than a revision already seen, or don't match the
+   * manifest are left out and counted in {@link vaultWarnings}.
+   */
   private async getItems(): Promise<VaultItem[]> {
     if (this.items) return this.items;
     const session = await this.requireSession();
-    const { items } = await this.call((s) => s.api.listItems(s.token));
-    // Items that fail to decrypt, or that the server rolled back to an older
-    // revision than this browser has seen, are left out.
-    const decrypted = await decryptVaultItems(items, session.vaultKey, this.ledger(session));
-    this.items = decrypted.items;
-    return this.items;
+    const ledger = this.ledger(session);
+    const { items: responses, manifest: payload } = await this.call((s) =>
+      s.api.listItems(s.token),
+    );
+    const decrypted = await decryptVaultItems(responses, session.vaultKey, ledger);
+    const warnings: VaultWarnings = {
+      ...NO_WARNINGS,
+      failed: decrypted.failed,
+      rolledBack: decrypted.rolledBack,
+    };
+
+    let manifest: VaultManifest | null = null;
+    if (payload) {
+      try {
+        manifest = await decryptManifest(
+          fromBase64(payload.encrypted_data),
+          fromBase64(payload.nonce),
+          session.vaultKey,
+          payload.version,
+        );
+      } catch (error) {
+        if (!(error instanceof DecryptionError)) throw error;
+        warnings.manifest = 'tampered';
+      }
+    }
+    const seenVersion = await ledger.manifestVersion();
+    if (manifest && manifest.version < seenVersion) warnings.manifest = 'stale';
+    if (!payload && seenVersion > 0) warnings.manifest = 'missing';
+
+    let items = decrypted.items;
+    if (manifest) {
+      const check = checkAgainstManifest(manifest, responses);
+      const hidden = new Set([...check.unexpected, ...check.mismatched]);
+      warnings.missing = check.missing.length;
+      warnings.unexpected = check.unexpected.length;
+      warnings.rolledBack += items.filter((item) => check.mismatched.includes(item.id)).length;
+      items = items.filter((item) => !hidden.has(item.id));
+      await ledger.recordManifest(manifest.version);
+    } else {
+      // No usable manifest: start one from what could be verified, at the
+      // version after the server's, so the next write repairs it.
+      manifest = {
+        version: payload?.version ?? 0,
+        items: Object.fromEntries(items.map((item) => [item.id, item.revision])),
+        updatedAt: '',
+        updatedBy: '',
+      };
+      if (!payload) {
+        // A vault that never had one gets its first right away.
+        const first = nextManifest(manifest, {}, CLIENT_NAME);
+        await this.call(async (s) =>
+          s.api.putManifest(s.token, await this.encryptManifestPayload(first, s.vaultKey)),
+        ).catch((error: unknown) => {
+          if (!isManifestConflict(error)) throw error;
+        });
+        manifest = first;
+        await ledger.recordManifest(first.version);
+      }
+    }
+    this.manifest = manifest;
+    this.warnings = warnings;
+    this.items = items;
+    return items;
+  }
+
+  /** What the last load's integrity checks found, for the popup to show. */
+  async vaultWarnings(): Promise<VaultWarnings> {
+    await this.getItems();
+    return this.warnings;
   }
 
   async listForPopup(): Promise<PopupItem[]> {
@@ -292,17 +484,19 @@ export class Vault {
     await this.deps.session.remove(pendingKey(tabId));
     if (!pending || !save) return;
 
-    const items = await this.getItems();
-    const existing = pending.itemId ? items.find((item) => item.id === pending.itemId) : undefined;
-    if (existing) {
-      await this.saveItem({ ...existing, password: pending.password }, existing);
+    if (pending.itemId) {
+      const itemId = pending.itemId;
+      await this.saveItem(
+        (current) => current && { ...current, password: pending.password },
+        itemId,
+      );
     } else {
-      await this.saveItem({
+      await this.saveItem(() => ({
         site: pending.host,
         username: pending.username,
         password: pending.password,
         notes: '',
-      });
+      }));
     }
   }
 
@@ -310,42 +504,68 @@ export class Vault {
   async addItem(data: VaultItemData): Promise<void> {
     const site = data.site.trim();
     if (!site) throw new Error('Enter the site for this login');
-    await this.saveItem({ ...data, site });
+    await this.saveItem(() => ({ ...data, site }));
   }
 
-  /** Saves a new item (revision 1, fresh id) or the next revision of `existing`. */
-  private async saveItem(data: VaultItemData, existing?: VaultItem): Promise<void> {
-    const session = await this.requireSession();
-    const payload = existing
-      ? await encryptVaultItem(data, session.vaultKey, existing.id, existing.revision + 1)
-      : await encryptVaultItem(data, session.vaultKey, crypto.randomUUID(), 1);
-    let response: Awaited<ReturnType<Api['createItem']>>;
-    try {
-      response = await this.call((s) =>
-        existing ? s.api.updateItem(s.token, payload) : s.api.createItem(s.token, payload),
+  /**
+   * Saves a new item (revision 1, fresh id), or the next revision of the item
+   * `existingId`. `build` makes the data from the item's current copy. The
+   * write carries the vault's next manifest; if the vault changed elsewhere
+   * meanwhile, it reloads and tries once more on the fresh copy.
+   */
+  private async saveItem(
+    build: (current: VaultItem | undefined) => VaultItemData | undefined,
+    existingId?: string,
+  ): Promise<void> {
+    for (let attempt = 0; ; attempt++) {
+      const items = await this.getItems();
+      const session = await this.requireSession();
+      const existing = existingId ? items.find((item) => item.id === existingId) : undefined;
+      if (existingId && !existing) throw new Error('That login is no longer in your vault');
+      const data = build(existing);
+      if (!data) return;
+      const payload = existing
+        ? await encryptVaultItem(data, session.vaultKey, existing.id, existing.revision + 1)
+        : await encryptVaultItem(data, session.vaultKey, crypto.randomUUID(), 1);
+      const manifest = nextManifest(
+        this.manifest!,
+        { set: [{ id: payload.id, revision: payload.revision }] },
+        CLIENT_NAME,
       );
-    } catch (error) {
-      // Changed elsewhere since we loaded it: reload before the next attempt.
-      if (error instanceof ApiError && error.status === 409) this.items = null;
-      throw error;
+      const manifestPayload = await this.encryptManifestPayload(manifest, session.vaultKey);
+      let response: Awaited<ReturnType<Api['createItem']>>;
+      try {
+        response = await this.call((s) =>
+          existing
+            ? s.api.updateItem(s.token, payload, manifestPayload)
+            : s.api.createItem(s.token, payload, manifestPayload),
+        );
+      } catch (error) {
+        if (error instanceof ApiError && error.status === 409) {
+          // Changed elsewhere since we loaded it: reload, and retry once.
+          this.items = null;
+          if (isManifestConflict(error) && attempt === 0) continue;
+        }
+        throw error;
+      }
+      const ledger = this.ledger(session);
+      await ledger.record([response]);
+      await ledger.recordManifest(manifest.version);
+      this.manifest = manifest;
+      const { site, username, password, notes } = data;
+      const saved: VaultItem = {
+        id: response.id,
+        revision: response.revision,
+        site,
+        username,
+        password,
+        notes,
+      };
+      this.items = existing
+        ? items.map((item) => (item.id === existing.id ? saved : item))
+        : [...items, saved];
+      return;
     }
-    await this.ledger(session).record([response]);
-    const { site, username, password, notes } = data;
-    const saved: VaultItem = {
-      id: response.id,
-      revision: response.revision,
-      site,
-      username,
-      password,
-      notes,
-    };
-    // Nothing cached (e.g. after a service-worker restart): the next read
-    // fetches the list, which already includes this save.
-    if (!this.items) return;
-    const items = this.items;
-    this.items = existing
-      ? items.map((item) => (item.id === existing.id ? saved : item))
-      : [...items, saved];
   }
 
   async forgetTab(tabId: number): Promise<void> {
