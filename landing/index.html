@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VaultX — Self-Hosted, Zero-Knowledge Password Manager</title>
+  <meta name="description" content="Self-hosted, zero-knowledge password manager. Your master password never leaves your browser. Encrypted with Argon2id and XChaCha20-Poly1305.">
+  <meta name="theme-color" content="#141a24">
+
+  <!-- Favicon SVG -->
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='46' fill='%23141a24' stroke='%23c9a45c' stroke-width='4'/><circle cx='50' cy='50' r='38' fill='none' stroke='%23c9a45c' stroke-width='1.5' opacity='0.6'/><path d='M50 27a11 11 0 0 1 6.5 19.9L60 72H40l3.5-25.1A11 11 0 0 1 50 27z' fill='%23c9a45c'/></svg>">
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700&family=JetBrains+Mono:wght@400;500;600&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+  <div class="bg-wall-grid" aria-hidden="true"></div>
+
+  <!-- Header -->
+  <header class="site-header" id="top">
+    <div class="header-inner container">
+      <a href="#top" class="brand-link" aria-label="VaultX Home">
+        <svg class="brand-emblem" viewBox="0 0 100 100" aria-hidden="true" focusable="false">
+          <circle cx="50" cy="50" r="46" fill="none" stroke="currentColor" stroke-width="3" />
+          <circle cx="50" cy="50" r="39" fill="none" stroke="currentColor" stroke-width="1.25" opacity="0.55" />
+          <path d="M50 27a11 11 0 0 1 6.5 19.9L60 72H40l3.5-25.1A11 11 0 0 1 50 27z" fill="currentColor" />
+        </svg>
+        <span class="brand-title">VaultX</span>
+      </a>
+
+      <nav class="nav-links" aria-label="Primary Navigation">
+        <a href="#how-it-works" class="nav-link">How It Works</a>
+        <a href="#how-to-use" class="nav-link">How to Use</a>
+        <a href="#setup" class="nav-link">Setup</a>
+      </nav>
+
+      <div class="header-actions">
+        <a href="#setup" class="btn btn-primary btn-sm">
+          <span>Deploy</span>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+        </a>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <!-- HERO SECTION -->
+    <section class="hero-section container">
+      <div class="hero-pill">
+        <span class="dot-green"></span>
+        <span>Self-Hosted &bull; Zero-Knowledge &bull; Open Source</span>
+      </div>
+
+      <h1 class="hero-title">
+        Your master password <br>
+        <span class="gold-gradient">never leaves your device.</span>
+      </h1>
+
+      <p class="hero-subtitle">
+        VaultX is a self-hosted password manager where all encryption happens client-side using 
+        <strong>Argon2id</strong> and <strong>XChaCha20-Poly1305</strong>. 
+        Your server stores only opaque ciphertext. Even if the database is leaked, zero secrets are exposed.
+      </p>
+
+      <div class="hero-actions">
+        <a href="#setup" class="btn btn-primary btn-lg">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          <span>Get Started in 1 Minute</span>
+        </a>
+        <a href="#how-it-works" class="btn btn-secondary btn-lg">
+          <span>See How It Works</span>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 9l-7 7-7-7"/></svg>
+        </a>
+      </div>
+
+      <!-- Quick Terminal Preview -->
+      <div class="terminal-card">
+        <div class="terminal-bar">
+          <div class="term-dots">
+            <span class="dot red"></span>
+            <span class="dot yellow"></span>
+            <span class="dot green"></span>
+          </div>
+          <span class="term-title">Quick Deploy</span>
+          <button type="button" class="copy-btn" data-copy="git clone https://github.com/PiyushY111/VaultX.git &amp;&amp; cd VaultX &amp;&amp; cp .env.example .env &amp;&amp; docker compose up -d --build" aria-label="Copy quick start commands">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            <span>Copy</span>
+          </button>
+        </div>
+        <pre class="terminal-body"><code><span class="prompt">$</span> git clone https://github.com/PiyushY111/VaultX.git &amp;&amp; cd VaultX
+<span class="prompt">$</span> cp .env.example .env
+<span class="prompt">$</span> docker compose up -d --build</code></pre>
+      </div>
+    </section>
+
+    <!-- SECTION: HOW IT WORKS (3 MINIMAL PILLARS) -->
+    <section class="section container" id="how-it-works">
+      <div class="section-heading">
+        <span class="kicker">Security Architecture</span>
+        <h2 class="title">How It Works</h2>
+        <p class="desc">Three mathematical guarantees ensure complete privacy.</p>
+      </div>
+
+      <div class="pillars-grid">
+        <div class="pillar-card">
+          <div class="pillar-num">01</div>
+          <h3>Local Key Derivation</h3>
+          <p>
+            Your master password is never transmitted. When logging in, your browser stretches it locally using <strong>Argon2id</strong> (64 MiB RAM, 3 passes), then uses <strong>HKDF</strong> to split it into two independent keys:
+          </p>
+          <ul class="pillar-list">
+            <li><strong>Stretched Master Key:</strong> Stays strictly in client RAM to decrypt the vault key.</li>
+            <li><strong>Auth Hash:</strong> Sent to the server for authentication only. It cannot decrypt your data.</li>
+          </ul>
+        </div>
+
+        <div class="pillar-card">
+          <div class="pillar-num">02</div>
+          <h3>Authenticated Encryption</h3>
+          <p>
+            Every credential is encrypted with <strong>XChaCha20-Poly1305</strong> under a random 256-bit vault key.
+          </p>
+          <ul class="pillar-list">
+            <li><strong>Fresh Nonces:</strong> A random 24-byte nonce is generated on every single save.</li>
+            <li><strong>Anti-Rollback Ledger:</strong> The item ID and monotonic revision counter are bound into the AEAD authenticated data. The server cannot swap or roll back items.</li>
+          </ul>
+        </div>
+
+        <div class="pillar-card">
+          <div class="pillar-num">03</div>
+          <h3>Opaque Server Storage</h3>
+          <p>
+            The Fastify + PostgreSQL backend only ever handles opaque ciphertext strings.
+          </p>
+          <ul class="pillar-list">
+            <li><strong>Zero Plaintext Leaks:</strong> Audited by tests that scan raw database tables.</li>
+            <li><strong>RAM Purging:</strong> Keys and plaintexts are wiped with <code>sodium.memzero</code> on lock or idle timeout.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- SECTION: HOW TO USE (4 ACTIONABLE STEPS) -->
+    <section class="section container" id="how-to-use">
+      <div class="section-heading">
+        <span class="kicker">User Guide</span>
+        <h2 class="title">How to Use VaultX</h2>
+        <p class="desc">A streamlined workflow for daily password management.</p>
+      </div>
+
+      <div class="steps-flow">
+        <div class="step-box">
+          <div class="step-badge">Step 1</div>
+          <h3>Create an Account</h3>
+          <p>Open the web vault (<code>http://localhost:5173</code>) and set your master password. The built-in entropy meter audits password strength client-side.</p>
+        </div>
+
+        <div class="step-box">
+          <div class="step-badge">Step 2</div>
+          <h3>Add Logins &amp; Secure Notes</h3>
+          <p>Store usernames, passwords, URLs, and notes. Use the cryptographic generator to create random, high-entropy 24+ character passwords.</p>
+        </div>
+
+        <div class="step-box">
+          <div class="step-badge">Step 3</div>
+          <h3>Autofill with Chrome Extension</h3>
+          <p>Load the Manifest V3 extension. When visiting saved websites, 1-click autofill enters your credentials safely without background scraping.</p>
+        </div>
+
+        <div class="step-box">
+          <div class="step-badge">Step 4</div>
+          <h3>Auto-Lock &amp; Manage Sessions</h3>
+          <p>Your vault auto-locks on inactivity. Inspect active browser sessions in the Security panel and revoke remote devices anytime.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- SECTION: STEP-BY-STEP SETUP -->
+    <section class="section container" id="setup">
+      <div class="section-heading">
+        <span class="kicker">Self-Hosting Guide</span>
+        <h2 class="title">Setup VaultX</h2>
+        <p class="desc">Deploy with Docker Compose or run the local development stack.</p>
+      </div>
+
+      <div class="setup-tabs">
+        <div class="tab-header" role="tablist">
+          <button type="button" class="tab-trigger active" role="tab" id="tab-docker-btn" aria-selected="true" data-tab="pane-docker">
+            Docker Compose (Recommended)
+          </button>
+          <button type="button" class="tab-trigger" role="tab" id="tab-web-btn" aria-selected="false" data-tab="pane-web">
+            Web Vault (Frontend)
+          </button>
+          <button type="button" class="tab-trigger" role="tab" id="tab-ext-btn" aria-selected="false" data-tab="pane-ext">
+            Chrome Extension
+          </button>
+        </div>
+
+        <!-- Pane 1: Docker -->
+        <div class="tab-content active" id="pane-docker" role="tabpanel">
+          <div class="setup-step">
+            <span class="step-index">1</span>
+            <div class="step-body">
+              <h4>Clone repository &amp; configure environment</h4>
+              <div class="cmd-row">
+                <code>git clone https://github.com/PiyushY111/VaultX.git &amp;&amp; cd VaultX
+cp .env.example .env</code>
+                <button type="button" class="copy-btn" data-copy="git clone https://github.com/PiyushY111/VaultX.git && cd VaultX && cp .env.example .env">Copy</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="setup-step">
+            <span class="step-index">2</span>
+            <div class="step-body">
+              <h4>Set secrets in <code>.env</code></h4>
+              <p>Generate 32-byte secrets for <code>POSTGRES_PASSWORD</code> and <code>PRELOGIN_SECRET</code>:</p>
+              <div class="cmd-row">
+                <code>openssl rand -base64 32</code>
+                <button type="button" class="copy-btn" data-copy="openssl rand -base64 32">Copy</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="setup-step">
+            <span class="step-index">3</span>
+            <div class="step-body">
+              <h4>Start API and PostgreSQL</h4>
+              <p>Runs Fastify API and PostgreSQL 17 in background containers:</p>
+              <div class="cmd-row">
+                <code>docker compose up -d --build</code>
+                <button type="button" class="copy-btn" data-copy="docker compose up -d --build">Copy</button>
+              </div>
+              <p class="hint">The API starts at <code>http://127.0.0.1:3000</code> and applies database migrations automatically.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Pane 2: Web Vault -->
+        <div class="tab-content" id="pane-web" role="tabpanel" hidden>
+          <div class="setup-step">
+            <span class="step-index">1</span>
+            <div class="step-body">
+              <h4>Install dependencies</h4>
+              <div class="cmd-row">
+                <code>npm install</code>
+                <button type="button" class="copy-btn" data-copy="npm install">Copy</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="setup-step">
+            <span class="step-index">2</span>
+            <div class="step-body">
+              <h4>Run web client</h4>
+              <p>Vite proxies <code>/api/*</code> to your API server so no CORS configuration is needed:</p>
+              <div class="cmd-row">
+                <code>API_URL=http://127.0.0.1:3000 npm run dev -w @password-manager/web</code>
+                <button type="button" class="copy-btn" data-copy="API_URL=http://127.0.0.1:3000 npm run dev -w @password-manager/web">Copy</button>
+              </div>
+              <p class="hint">Open <strong>http://localhost:5173</strong> to create your vault.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Pane 3: Chrome Extension -->
+        <div class="tab-content" id="pane-ext" role="tabpanel" hidden>
+          <div class="setup-step">
+            <span class="step-index">1</span>
+            <div class="step-body">
+              <h4>Build extension</h4>
+              <div class="cmd-row">
+                <code>npm run build -w @password-manager/extension</code>
+                <button type="button" class="copy-btn" data-copy="npm run build -w @password-manager/extension">Copy</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="setup-step">
+            <span class="step-index">2</span>
+            <div class="step-body">
+              <h4>Load in Chrome</h4>
+              <ol class="mini-list">
+                <li>Go to <code>chrome://extensions</code> and enable <strong>Developer mode</strong>.</li>
+                <li>Click <strong>Load unpacked</strong> and select <code>packages/extension/dist</code>.</li>
+                <li>Click the extension icon, enter your API URL (<code>http://127.0.0.1:3000</code>), and unlock.</li>
+              </ol>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Footer -->
+  <footer class="site-footer">
+    <div class="container footer-content">
+      <div class="footer-left">
+        <a href="#top" class="brand-link">
+          <svg class="brand-emblem-sm" viewBox="0 0 100 100" aria-hidden="true">
+            <circle cx="50" cy="50" r="46" fill="none" stroke="currentColor" stroke-width="3" />
+            <circle cx="50" cy="50" r="39" fill="none" stroke="currentColor" stroke-width="1.25" opacity="0.55" />
+            <path d="M50 27a11 11 0 0 1 6.5 19.9L60 72H40l3.5-25.1A11 11 0 0 1 50 27z" fill="currentColor" />
+          </svg>
+          <span class="brand-title">VaultX</span>
+        </a>
+        <p class="footer-desc">Zero-knowledge, self-hosted password manager.</p>
+      </div>
+
+      <div class="footer-right">
+        <nav class="footer-nav">
+          <a href="#how-it-works">How It Works</a>
+          <a href="#how-to-use">How to Use</a>
+          <a href="#setup">Setup</a>
+          <a href="#top" class="back-link">Back to Top &uarr;</a>
+        </nav>
+        <p class="footer-copy">&copy; 2026 VaultX. Open source (MIT).</p>
+      </div>
+    </div>
+  </footer>
+
+  <div class="toast-box" id="toastBox" aria-live="polite"></div>
+
+  <script src="script.js"></script>
+</body>
+</html>

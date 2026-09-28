@@ -19,6 +19,7 @@
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
+    "landing": "npx -y serve landing",
     "clean": "npm run clean --workspaces --if-present"
   },
   "devDependencies": {
