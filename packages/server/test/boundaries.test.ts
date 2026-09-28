@@ -36,9 +36,28 @@ describe('zero-knowledge boundary', () => {
     }
   });
 
-  it('server source never calls a decrypt function', async () => {
+  // The one exception is the two-factor secret: the server generates it,
+  // holds it, and must read it to check codes, so it's encrypted at rest
+  // under a server key (TOTP_ENCRYPTION_KEY). That is decryption of the
+  // server's own data, never of anything a client encrypted.
+  it('server source never calls a decrypt function, except decryptTotpSecret', async () => {
     for (const file of await sourceFiles(SRC_DIR)) {
-      expect(await readFile(file, 'utf8'), file).not.toMatch(/decrypt\w*\s*\(/i);
+      const source = (await readFile(file, 'utf8')).replace(
+        /(?:decryptTotpSecret|TotpSecretDecryptionError)\s*\(/g,
+        '',
+      );
+      expect(source, file).not.toMatch(/decrypt\w*\s*\(/i);
+    }
+  });
+
+  it('only totp-secret-box.ts creates a decipher, and it reads no vault columns', async () => {
+    for (const file of await sourceFiles(SRC_DIR)) {
+      const source = await readFile(file, 'utf8');
+      if (file.endsWith(join('src', 'totp-secret-box.ts'))) {
+        expect(source).not.toMatch(/encrypted_vault_key|encrypted_data|encrypted_manifest/);
+        continue;
+      }
+      expect(source, file).not.toMatch(/createDecipher/);
     }
   });
 

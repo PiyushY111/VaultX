@@ -7,13 +7,16 @@ import {
   nextManifest,
 } from '@password-manager/crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { ENCRYPTED_TOTP_SECRET_BYTES, decryptTotpSecret } from '../src/totp-secret-box.js';
 import {
+  TEST_WEBAUTHN,
   b64,
   bearer,
   createClientUser,
   createItem,
   currentManifest,
   deleteItem,
+  base32Decode,
   encryptManifestBody,
   totpCode,
   createTestContext,
@@ -28,6 +31,7 @@ import {
   type Secret,
   type TestContext,
 } from './helpers.js';
+import { SoftwareAuthenticator } from './software-authenticator.js';
 
 // Distinctive markers so a hit can only mean a real leak, never a chance
 // match inside random ciphertext.
@@ -78,6 +82,11 @@ describe('raw database rows never contain plaintext or key material', () => {
   /** Bob before his password change (old keys, old vault key). */
   let bobBefore: ClientUser;
   let recoveryCodes: string[] = [];
+  /** Alice's active two-factor secret and Bob's pending one, base32 as the server returned them. */
+  let aliceTotpSecret: string;
+  let bobPendingTotpSecret: string;
+  /** Alice's passkey (registered after TOTP, then used to log in). */
+  const alicePasskey = new SoftwareAuthenticator();
   let aliceTokens: string[];
   let bobTokens: string[];
   let secrets: Secret[];
@@ -207,6 +216,58 @@ describe('raw database rows never contain plaintext or key material', () => {
     });
     expect(enable.statusCode, enable.body).toBe(200);
     recoveryCodes = enable.json<{ recovery_codes: string[] }>().recovery_codes;
+    aliceTotpSecret = setup.json().secret;
+
+    // Alice adds a passkey (password + her next TOTP code), then logs in with it.
+    const origin = TEST_WEBAUTHN.origins[0]!;
+    const registerOptions = await app.inject({
+      method: 'POST',
+      url: '/account/passkeys/register/options',
+      headers: bearer(a.token),
+      payload: { current_auth_hash: b64(alice.authHash), totp_code: totpCode(aliceTotpSecret, 1) },
+    });
+    expect(registerOptions.statusCode, registerOptions.body).toBe(200);
+    const registered = await app.inject({
+      method: 'POST',
+      url: '/account/passkeys',
+      headers: bearer(a.token),
+      payload: {
+        name: 'Alice laptop',
+        response: alicePasskey.register(registerOptions.json().options, { origin }),
+      },
+    });
+    expect(registered.statusCode, registered.body).toBe(201);
+    const prompt = await app.inject({
+      method: 'POST',
+      url: '/login',
+      payload: { email: alice.email, auth_hash: b64(alice.authHash) },
+    });
+    const passkeyLogin = await app.inject({
+      method: 'POST',
+      url: '/login',
+      payload: {
+        email: alice.email,
+        auth_hash: b64(alice.authHash),
+        webauthn: alicePasskey.authenticate(prompt.json().webauthn_options, { origin }),
+      },
+    });
+    expect(passkeyLogin.statusCode, passkeyLogin.body).toBe(200);
+    aliceTokens.push(passkeyLogin.json().token);
+    // An open challenge, left in the table for the scan.
+    await app.inject({
+      method: 'POST',
+      url: '/login',
+      payload: { email: alice.email, auth_hash: b64(alice.authHash) },
+    });
+
+    // Bob starts two-factor setup but doesn't finish, leaving a pending secret.
+    const bobSetup = await app.inject({
+      method: 'POST',
+      url: '/account/totp/setup',
+      headers: bearer(b.token),
+    });
+    expect(bobSetup.statusCode, bobSetup.body).toBe(200);
+    bobPendingTotpSecret = bobSetup.json().secret;
 
     secrets = [
       ...userSecrets('alice', alice, aliceTokens),
@@ -219,6 +280,12 @@ describe('raw database rows never contain plaintext or key material', () => {
         { name: `alice recovery code #${i + 1}`, value: code },
         { name: `alice recovery code #${i + 1} (normalized)`, value: code.replace('-', '') },
       ]),
+      // Two-factor secrets are encrypted at rest under TOTP_ENCRYPTION_KEY.
+      // The raw bytes are also checked as base64, base64url and hex.
+      { name: 'alice TOTP secret (raw)', value: base32Decode(aliceTotpSecret) },
+      { name: 'alice TOTP secret (base32)', value: aliceTotpSecret },
+      { name: 'bob pending TOTP secret (raw)', value: base32Decode(bobPendingTotpSecret) },
+      { name: 'bob pending TOTP secret (base32)', value: bobPendingTotpSecret },
       // A field name that appears only inside the manifest's plaintext JSON.
       { name: 'manifest plaintext', value: '"updated_by"' },
     ];
@@ -236,6 +303,8 @@ describe('raw database rows never contain plaintext or key material', () => {
       'totp_recovery_codes',
       'users',
       'vault_items',
+      'webauthn_challenges',
+      'webauthn_credentials',
     ]);
   });
 
@@ -243,8 +312,9 @@ describe('raw database rows never contain plaintext or key material', () => {
     const leaks = await scanDatabaseForSecrets(ctx.pool, secrets);
     expect(leaks).toEqual([]);
     // Sanity check that the scan covered what we think it did: 3 key sets
-    // (alice, bob before and after his password change) x (5 keys/passwords) + 3 session tokens + 5 items x (JSON + 4 fields).
-    expect(secrets).toHaveLength(3 * 5 + 3 + 5 * 5 + 10 * 2 + 1);
+    // (alice, bob before and after his password change) x (5 keys/passwords) + 4 session tokens + 5 items x (JSON + 4 fields).
+    // + 10 recovery codes x 2 + 2 TOTP secrets x (raw + base32) + the manifest marker.
+    expect(secrets).toHaveLength(3 * 5 + 4 + 5 * 5 + 10 * 2 + 2 * 2 + 1);
   });
 
   it('users: stores only a hash of the authHash, plus ciphertext, nonce, salt and params exactly as sent', async () => {
@@ -266,6 +336,7 @@ describe('raw database rows never contain plaintext or key material', () => {
         'totp_secret',
         'totp_pending_secret',
         'totp_last_step',
+        'webauthn_required',
       ].sort(),
     );
 
@@ -306,6 +377,20 @@ describe('raw database rows never contain plaintext or key material', () => {
         decryptVaultKey(row.encrypted_vault_key, row.vault_key_nonce, user.authHash),
       ).rejects.toThrow(DecryptionError);
     }
+
+    // Two-factor secrets: server-key ciphertext (key id, nonce, ciphertext,
+    // tag), never the 20 raw bytes.
+    const [aliceRow, bobRow] = rows;
+    expect(aliceRow.totp_secret).toHaveLength(ENCRYPTED_TOTP_SECRET_BYTES);
+    expect(aliceRow.totp_pending_secret).toBeNull();
+    expect(bobRow.totp_secret).toBeNull();
+    expect(bobRow.totp_pending_secret).toHaveLength(ENCRYPTED_TOTP_SECRET_BYTES);
+    expect(
+      decryptTotpSecret(ctx.config.totpKeys, aliceRow.id, 'active', aliceRow.totp_secret),
+    ).toEqual(base32Decode(aliceTotpSecret));
+    expect(
+      decryptTotpSecret(ctx.config.totpKeys, bobRow.id, 'pending', bobRow.totp_pending_secret),
+    ).toEqual(base32Decode(bobPendingTotpSecret));
   });
 
   it('vault_items: stores exactly the ciphertext and nonce the client sent, nothing else', async () => {
@@ -338,6 +423,34 @@ describe('raw database rows never contain plaintext or key material', () => {
     }
   });
 
+  it('webauthn tables: only public keys, credential ids, counters and random challenges', async () => {
+    const { rows: credentials } = await ctx.pool.query('SELECT * FROM webauthn_credentials');
+    expect(credentials).toHaveLength(1);
+    expect(Object.keys(credentials[0]).sort()).toEqual(
+      [
+        'created_at',
+        'credential_id',
+        'id',
+        'last_used_at',
+        'name',
+        'public_key',
+        'sign_counter',
+        'transports',
+        'user_id',
+      ].sort(),
+    );
+    expect(credentials[0].credential_id).toEqual(alicePasskey.credentialId);
+    expect(credentials[0].name).toBe('Alice laptop');
+    expect(credentials[0].last_used_at).not.toBeNull();
+
+    const { rows: challenges } = await ctx.pool.query('SELECT * FROM webauthn_challenges');
+    expect(challenges.length).toBeGreaterThan(0);
+    expect(Object.keys(challenges[0]).sort()).toEqual(
+      ['challenge', 'created_at', 'expires_at', 'id', 'purpose', 'user_id'].sort(),
+    );
+    for (const row of challenges) expect(row.challenge).toHaveLength(32);
+  });
+
   it('sessions: stores only SHA-256 hashes of bearer tokens', async () => {
     const { rows } = await ctx.pool.query('SELECT * FROM sessions');
     expect(Object.keys(rows[0]).sort()).toEqual(
@@ -366,6 +479,8 @@ describe('raw database rows never contain plaintext or key material', () => {
     const responses = await Promise.all([
       ctx.app.inject({ method: 'GET', url: '/vault-items', headers: bearer(aliceTokens[0]!) }),
       ctx.app.inject({ method: 'GET', url: '/vault-key', headers: bearer(aliceTokens[0]!) }),
+      ctx.app.inject({ method: 'GET', url: '/account/passkeys', headers: bearer(aliceTokens[0]!) }),
+      ctx.app.inject({ method: 'GET', url: '/account', headers: bearer(aliceTokens[0]!) }),
       ctx.app.inject({ method: 'POST', url: '/prelogin', payload: { email: alice.email } }),
     ]);
     const nonTokenSecrets = secrets.filter((secret) => !secret.name.includes('session token'));
@@ -414,6 +529,48 @@ describe('the leak scanner itself', () => {
           { table: 'vault_items', column: 'encrypted_data', secret: 'item', encoding: 'raw' },
           { table: 'users', column: 'auth_hash', secret: 'raw authHash', encoding: 'raw' },
           { table: 'users', column: 'kdf_params', secret: 'master password', encoding: 'base64' },
+        ]),
+      );
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it('detects a planted raw, base32 or hex TOTP secret', async () => {
+    const ctx = await createTestContext();
+    try {
+      const { user, token } = await registerAndLogin(
+        ctx.app,
+        'plant-totp@example.com',
+        'planted-TOTP-PASSWORD-0000',
+      );
+      const setup = await ctx.app.inject({
+        method: 'POST',
+        url: '/account/totp/setup',
+        headers: bearer(token),
+      });
+      const secret: string = setup.json().secret;
+      const secrets: Secret[] = [
+        { name: 'totp raw', value: base32Decode(secret) },
+        { name: 'totp base32', value: secret },
+      ];
+      expect(await scanDatabaseForSecrets(ctx.pool, secrets)).toEqual([]);
+
+      // A buggy server: the raw secret in the column (the pre-005 format),
+      // and base32 and hex copies stashed elsewhere.
+      await ctx.pool.query('UPDATE users SET totp_pending_secret = $2 WHERE email = $1', [
+        user.email,
+        base32Decode(secret),
+      ]);
+      await ctx.pool.query(
+        `UPDATE users SET kdf_params = kdf_params || jsonb_build_object('b32', $1::text, 'hex', $2::text)`,
+        [secret, base32Decode(secret).toString('hex')],
+      );
+      expect(await scanDatabaseForSecrets(ctx.pool, secrets)).toEqual(
+        expect.arrayContaining([
+          { table: 'users', column: 'totp_pending_secret', secret: 'totp raw', encoding: 'raw' },
+          { table: 'users', column: 'kdf_params', secret: 'totp base32', encoding: 'raw' },
+          { table: 'users', column: 'kdf_params', secret: 'totp raw', encoding: 'hex' },
         ]),
       );
     } finally {

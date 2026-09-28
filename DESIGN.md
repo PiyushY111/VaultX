@@ -191,6 +191,161 @@ Turning two-factor off, replacing recovery codes, and deleting the account
 all take the master password (re-derived, and checked locally first) and a
 code.
 
+#### Two-factor secrets at rest (server)
+
+Unlike everything else the server stores, the TOTP secret is the server's
+own: it generates it and has to read it back to check codes. Since
+migration 005 both `totp_secret` and `totp_pending_secret` are encrypted
+under a server key, `TOTP_ENCRYPTION_KEY` (`packages/server/src/totp-secret-box.ts`):
+
+```
+key id (1) ‖ nonce (12, random) ‖ AES-256-GCM(secret, 20 bytes) ‖ tag (16)   = 49 bytes
+AAD = "password-manager:server:totp:v1" ‖ 0x00 ‖ user id ‖ 0x00 ‖ ("active" | "pending") ‖ 0x00 ‖ key id
+```
+
+- **Why AES-256-GCM from `node:crypto`**, not libsodium: the server doesn't
+  load the client crypto package (a boundary test enforces that), and
+  96-bit random nonces are safe here: at most two secrets per account per
+  key, far below GCM's ~2^32-messages-per-key limit.
+- **AAD binding.** A ciphertext only opens for the user and column it was
+  written for, so someone who can write to the database can't copy another
+  account's secret in, or turn a pending secret into the active one. For the
+  same reason, `/account/totp/enable` decrypts the pending secret and
+  encrypts it again for the active column rather than copying the bytes.
+- **Keys and rotation.** `TOTP_ENCRYPTION_KEY` is a comma-separated list of
+  base64 32-byte keys. The first encrypts; all of them decrypt. A key's id is
+  the first byte of `SHA-256("password-manager:server:totp-key-id:v1" ‖ 0x00 ‖ key)`,
+  so it doesn't depend on the key's position in the list, and putting a new
+  key in front keeps the old ids valid. Startup refuses two keys with the
+  same id (1 in 256 for a new key; generate another). To rotate: put the new
+  key first, restart, run `npm run rotate-totp-key -w @password-manager/server`
+  (idempotent; exits non-zero and lists any account it couldn't decrypt),
+  then drop the old key and restart.
+- **Required, validated at startup.** The server won't start without a
+  well-formed key: each entry must be exactly 32 bytes of padded base64, not
+  all zeros, and not repeated. There is no ephemeral fallback (unlike
+  `PRELOGIN_SECRET`): a random key would lock every two-factor user out on
+  the next restart. Error messages give a key's position, never its value.
+- **Legacy secrets.** Rows written before migration 005 hold the raw 20
+  bytes. SQL can't encrypt them (the key isn't in the database), so 005 only
+  widens the `CHECK`s to allow 20 or 49 bytes. After migrating and before
+  listening, the server encrypts every 20-byte value (idempotent, row-locked,
+  safe with several instances starting at once). The read path still accepts
+  a 20-byte value, so a row written by an old instance during a rolling
+  upgrade keeps working until the next start re-encrypts it.
+- **Unknown keys fail closed.** Startup refuses to run if any stored secret
+  uses a key id that isn't configured (the old key was dropped before
+  rotation finished), naming the ids and account counts. At request time, a
+  secret that won't decrypt is a 500, never a successful or merely failed
+  login.
+- Decrypted secrets are zeroed (`Buffer.fill(0)`) after use. That is best
+  effort: V8 may have copied them, and the keys themselves stay in memory for
+  the life of the process.
+
+Decisions taken where the requirements left room, choosing the more
+conservative option:
+
+- **Refuse to start** on keys missing from the keyring, rather than start
+  and fail those accounts' logins.
+- **Keep accepting legacy 20-byte values** on read. This doesn't weaken
+  anything: someone who can write the database can already set
+  `totp_secret` to `NULL`, which turns two-factor off for that account.
+- The domain-separation labels live in `packages/server/src/totp-secret-box.ts`,
+  next to the server's other labels (`tokens.ts`, `totp.ts`), not in
+  `packages/crypto/src/constants.ts`, which is client-side libsodium code
+  the server must not load.
+
+### Passkeys (WebAuthn) as a second factor
+
+A passkey is a phishing-resistant alternative to TOTP. Like TOTP it guards
+logging in to the server (and account changes), never the vault's
+encryption: the vault key still comes only from the master password. The
+server stores only public keys and random challenges
+(`packages/server/src/webauthn.ts`, using `@simplewebauthn/server`; the web
+vault uses `@simplewebauthn/browser`).
+
+**Ceremonies.** Every one uses a 32-byte random challenge stored in
+`webauthn_challenges`, bound to one user and one purpose (`register`,
+`login` or `reauth`), valid for 120 seconds, and deleted as it is checked
+(`DELETE … RETURNING`, so each works once even under concurrent requests).
+At most five are kept open per user and purpose. Every check requires the
+origin to be one of `WEBAUTHN_ORIGINS`, the RP ID hash to match
+`WEBAUTHN_RP_ID`, and **user verification** (a PIN or biometric, not just a
+touch: `userVerification: 'required'`).
+
+1. **Register.** `POST /account/passkeys/register/options` takes the master
+   password and, if the account already has a second factor, one of those
+   (through `verifyCurrentUser`, so wrong answers count toward the login
+   lockout). It returns creation options; the challenge carries that proof
+   to `POST /account/passkeys {name, response}`, which verifies the
+   attestation and stores the credential. `attestation: 'none'`: any
+   authenticator is accepted, and its make and model aren't checked. If this
+   is the account's first second factor, the reply includes ten recovery
+   codes.
+2. **Log in.** After the auth hash matches, the "second factor needed" reply
+   (`401 {totp_required: true, second_factor_methods, webauthn_options}`)
+   carries fresh request options listing only this account's credentials.
+   The client signs and sends the assertion as `webauthn` in the next
+   `POST /login`. The credential is looked up by (user, credential id), so
+   another account's passkey never verifies. A refused passkey counts as a
+   failed attempt, and the reply carries a new challenge for the next try.
+   Nothing about two-factor (not even whether passkeys exist) is revealed
+   before the password is proven, exactly as for TOTP.
+3. **Re-authenticate.** `POST /account/passkeys/reauth-options` gives a
+   `reauth` challenge; the assertion goes in the `webauthn` field of any
+   request that takes a second factor.
+
+**Signature counter.** When a passkey reports a non-zero counter, it must
+be higher than the stored one, or the assertion is refused as a possible
+clone (and the user is told to use another factor and remove that passkey).
+Updates are conditional (`sign_counter < new`), so two racing requests
+can't both pass. Passkeys that always report 0 (most synced passkeys) are
+accepted: for them, the counter can't detect cloning.
+
+**"Require passkey".** `PUT /account/passkeys/required` (password + second
+factor) sets `users.webauthn_required`. While it's on, TOTP codes are not
+accepted as a second factor, for logging in or for account changes. The
+TOTP secret itself is kept, so turning the option off restores it.
+Recovery codes still work: they are the way back from a lost passkey.
+
+**Deleting.** `DELETE /account/passkeys/:id` always takes the password and a
+second factor. Deleting the last second factor (no other passkey, no TOTP)
+turns two-factor off and deletes the recovery codes; the web vault warns
+first. The only passkey can't be deleted while "Require passkey" is on
+(409); turn that off first. Turning TOTP off keeps the recovery codes when
+passkeys remain, since they back up every factor. Renaming (`PATCH`) takes
+only the session: it changes a label.
+
+**The extension doesn't do passkeys.** WebAuthn from an extension popup is
+unreliable across browsers, and a passkey made for the web vault is bound
+to the web vault's origin, not `chrome-extension://…`. So the extension
+keeps TOTP and recovery codes. When the server's reply lists no `totp` (the
+account is passkey-only, or has "Require passkey" on), the popup says the
+account needs a passkey, points to the web vault, and offers a recovery
+code. The cost: someone who only uses the extension with a passkey-only
+account uses up a recovery code each time.
+
+Decisions taken where the requirements left room, choosing the more
+conservative option:
+
+- **WEBAUTHN_RP_ID and WEBAUTHN_ORIGINS are required** (the server won't
+  start without them) rather than passkeys being silently turned off. The
+  RP ID must be a lowercase domain (no IP, scheme, port or path). Each
+  origin must be exact (no path), use https (http only for `localhost`),
+  and sit on the RP ID or a subdomain of it.
+- **User verification is required**, for registration and every assertion.
+- **"Require passkey" also applies to re-authentication**, not only to
+  login: otherwise a phished TOTP code plus a stolen session could still
+  remove the passkeys.
+- **Adding a factor needs an existing factor.** Registering a passkey, or
+  turning on TOTP when a passkey exists, takes one of the account's current
+  second factors, not just the password.
+- **One credential, one account**: `credential_id` is unique across users.
+- **A counter that doesn't increase is refused**, not just logged.
+- **Login doesn't need a separate "begin" call.** The "second factor
+  needed" reply already requires the password, so it hands out the
+  challenge; this keeps the rule "nothing before the password" in one place.
+
 ### Account deletion
 
 `DELETE /account {current_auth_hash, totp_code?, recovery_code?}` deletes the
@@ -332,21 +487,40 @@ numbered SQL migrations, applied on startup under an advisory lock.
 
 **users**
 
-| Column                             | Type                | Contents                                                        |
-| ---------------------------------- | ------------------- | --------------------------------------------------------------- |
-| id                                 | uuid PK             |                                                                 |
-| email                              | text, unique        | Lower-cased.                                                    |
-| kdf_salt                           | bytea(16)           | Argon2id salt.                                                  |
-| kdf_params                         | jsonb               | `{memoryCost, iterations, parallelism}`.                        |
-| auth_hash                          | bytea(32)           | SHA-256 of the client's auth hash (never the auth hash itself). |
-| encrypted_vault_key                | bytea(48)           | Vault key + Poly1305 tag.                                       |
-| vault_key_nonce                    | bytea(24)           |                                                                 |
-| created_at                         | timestamptz         |                                                                 |
-| manifest_version                   | integer             | 0 until the first manifest is written.                          |
-| encrypted_manifest, manifest_nonce | bytea, nullable     | The client's encrypted vault manifest.                          |
-| totp_secret                        | bytea(20), nullable | Two-factor secret, once turned on.                              |
-| totp_pending_secret                | bytea(20), nullable | During setup, until confirmed with a code.                      |
-| totp_last_step                     | bigint              | Last accepted TOTP time step (so codes work once).              |
+| Column                             | Type                | Contents                                                         |
+| ---------------------------------- | ------------------- | ---------------------------------------------------------------- |
+| id                                 | uuid PK             |                                                                  |
+| email                              | text, unique        | Lower-cased.                                                     |
+| kdf_salt                           | bytea(16)           | Argon2id salt.                                                   |
+| kdf_params                         | jsonb               | `{memoryCost, iterations, parallelism}`.                         |
+| auth_hash                          | bytea(32)           | SHA-256 of the client's auth hash (never the auth hash itself).  |
+| encrypted_vault_key                | bytea(48)           | Vault key + Poly1305 tag.                                        |
+| vault_key_nonce                    | bytea(24)           |                                                                  |
+| created_at                         | timestamptz         |                                                                  |
+| manifest_version                   | integer             | 0 until the first manifest is written.                           |
+| encrypted_manifest, manifest_nonce | bytea, nullable     | The client's encrypted vault manifest.                           |
+| totp_secret                        | bytea(49), nullable | Two-factor secret, once on; encrypted under TOTP_ENCRYPTION_KEY. |
+| totp_pending_secret                | bytea(49), nullable | During setup, until confirmed with a code; encrypted likewise.   |
+| totp_last_step                     | bigint              | Last accepted TOTP time step (so codes work once).               |
+| webauthn_required                  | boolean             | "Require passkey": TOTP codes don't count as a second factor.    |
+
+**webauthn_credentials**
+
+| Column        | Type                     | Contents                                              |
+| ------------- | ------------------------ | ----------------------------------------------------- |
+| id            | uuid PK                  |                                                       |
+| user_id       | uuid FK → users, cascade |                                                       |
+| credential_id | bytea (1–1023), unique   | Chosen by the authenticator; unique across all users. |
+| public_key    | bytea                    | COSE public key. Verifies signatures only.            |
+| sign_counter  | bigint (0 – 2^32−1)      | Last counter seen; must increase when non-zero.       |
+| transports    | text[]                   | Hints for the browser (`internal`, `usb`, …).         |
+| name          | text (1–64)              | The user's label.                                     |
+| created_at    | timestamptz              |                                                       |
+| last_used_at  | timestamptz, nullable    |                                                       |
+
+**webauthn_challenges**: `user_id`, `purpose` (`register` / `login` /
+`reauth`), `challenge` (32 random bytes, unique), `created_at`,
+`expires_at` (120 s). Deleted when used or expired.
 
 **vault_items**
 

@@ -24,16 +24,16 @@ import {
   sessionListResponseSchema,
   totpSetupResponseSchema,
 } from '../schemas.js';
+import { replaceRecoveryCodes } from '../recovery-codes.js';
 import { hashAuthHash } from '../tokens.js';
+import { decryptTotpSecret, encryptTotpSecret } from '../totp-secret-box.js';
+import { base32Encode, generateTotpSecret, otpauthUri, verifyTotp } from '../totp.js';
 import {
-  base32Encode,
-  generateRecoveryCodes,
-  generateTotpSecret,
-  hashRecoveryCode,
-  otpauthUri,
-  verifyTotp,
-} from '../totp.js';
-import { verifyCurrentUser, type SecondFactor } from '../verify-user.js';
+  loadSecondFactorState,
+  secondFactorEnabled,
+  verifyCurrentUser,
+  type SecondFactor,
+} from '../verify-user.js';
 import {
   ITEM_COLUMNS,
   NONCE_REUSE_MESSAGE,
@@ -57,6 +57,11 @@ interface ReauthBody extends SecondFactor {
   current_auth_hash: string;
 }
 
+interface EnableTotpBody extends Omit<SecondFactor, 'totp_code'> {
+  current_auth_hash: string;
+  totp_code: string;
+}
+
 interface SessionRow {
   id: string;
   client: string | null;
@@ -71,16 +76,6 @@ const VAULT_CHANGED_MESSAGE =
 
 const decodeAuthHash = (value: string) =>
   decodeBytes(value, 'current_auth_hash', { exact: AUTH_HASH_BYTES });
-
-async function replaceRecoveryCodes(db: pg.PoolClient, userId: string): Promise<string[]> {
-  const codes = generateRecoveryCodes();
-  await db.query('DELETE FROM totp_recovery_codes WHERE user_id = $1', [userId]);
-  await db.query(
-    'INSERT INTO totp_recovery_codes (user_id, code_hash) SELECT $1, unnest($2::bytea[])',
-    [userId, codes.map(hashRecoveryCode)],
-  );
-  return codes;
-}
 
 /**
  * Sessions, master-password change, two-factor setup and account deletion.
@@ -256,10 +251,14 @@ export function registerAccountRoutes(
         created_at: Date;
         totp_enabled: boolean;
         recovery_codes_remaining: number;
+        passkeys: number;
+        passkey_required: boolean;
       }>(
         `SELECT email, created_at, totp_secret IS NOT NULL AS totp_enabled,
            (SELECT count(*)::int FROM totp_recovery_codes WHERE user_id = users.id)
-             AS recovery_codes_remaining
+             AS recovery_codes_remaining,
+           (SELECT count(*)::int FROM webauthn_credentials WHERE user_id = users.id) AS passkeys,
+           webauthn_required AS passkey_required
          FROM users WHERE id = $1`,
         [request.userId],
       );
@@ -274,32 +273,48 @@ export function registerAccountRoutes(
     { ...sensitive, schema: { response: { 200: totpSetupResponseSchema } } },
     async (request) => {
       const secret = generateTotpSecret();
-      const { rows } = await pool.query<{ email: string }>(
-        `UPDATE users SET totp_pending_secret = $2
-         WHERE id = $1 AND totp_secret IS NULL
-         RETURNING email`,
-        [request.userId, secret],
-      );
-      if (!rows[0]) throw conflict('Two-factor authentication is already on.');
-      return { secret: base32Encode(secret), otpauth_uri: otpauthUri(rows[0].email, secret) };
+      try {
+        const { rows } = await pool.query<{ email: string }>(
+          `UPDATE users SET totp_pending_secret = $2
+           WHERE id = $1 AND totp_secret IS NULL
+           RETURNING email`,
+          [request.userId, encryptTotpSecret(config.totpKeys, request.userId, 'pending', secret)],
+        );
+        if (!rows[0]) throw conflict('Two-factor authentication is already on.');
+        return { secret: base32Encode(secret), otpauth_uri: otpauthUri(rows[0].email, secret) };
+      } finally {
+        secret.fill(0);
+      }
     },
   );
 
   // Step 2: the master password plus a code from the app proves it was set
-  // up correctly. Returns one-time recovery codes, shown only this once.
-  app.post<{ Body: { current_auth_hash: string; totp_code: string } }>(
+  // up correctly. If the account already has a passkey, adding a factor
+  // takes one of the existing ones too (a passkey or recovery code).
+  // Returns one-time recovery codes (replacing any old ones), shown only
+  // this once.
+  app.post<{ Body: EnableTotpBody }>(
     '/account/totp/enable',
     {
       ...sensitive,
       schema: { body: enableTotpBodySchema, response: { 200: recoveryCodesResponseSchema } },
     },
     async (request) => {
+      if ((await loadSecondFactorState(pool, request.userId)).totpEnabled) {
+        throw conflict('Two-factor authentication is already on.');
+      }
+      const { webauthn, recovery_code } = request.body;
       await verifyCurrentUser(
         pool,
         config,
         request.userId,
-        { current_auth_hash: decodeAuthHash(request.body.current_auth_hash) },
-        { requireSecondFactor: false },
+        {
+          current_auth_hash: decodeAuthHash(request.body.current_auth_hash),
+          // Never the new code: it proves the new authenticator, not the user.
+          ...(webauthn && { webauthn }),
+          ...(recovery_code && { recovery_code }),
+        },
+        { requireSecondFactor: true },
       );
       const recoveryCodes = await withTransaction(pool, async (db) => {
         const { rows } = await db.query<{ totp_pending_secret: Buffer | null; enabled: boolean }>(
@@ -310,16 +325,25 @@ export function registerAccountRoutes(
         const { totp_pending_secret: pending, enabled } = rows[0]!;
         if (enabled) throw conflict('Two-factor authentication is already on.');
         if (!pending) throw conflict('Start two-factor setup first.');
-        const step = verifyTotp(pending, request.body.totp_code, 0);
-        if (step === null) {
-          throw forbidden('That code doesn’t match. Check the time on your device and try again.');
+        // The AAD names the column, so the pending ciphertext can't simply be
+        // copied across: decrypt it and encrypt it again as the active secret.
+        const secret = decryptTotpSecret(config.totpKeys, request.userId, 'pending', pending);
+        try {
+          const step = verifyTotp(secret, request.body.totp_code, 0);
+          if (step === null) {
+            throw forbidden(
+              'That code doesn’t match. Check the time on your device and try again.',
+            );
+          }
+          const active = encryptTotpSecret(config.totpKeys, request.userId, 'active', secret);
+          await db.query(
+            `UPDATE users SET totp_secret = $3, totp_pending_secret = NULL, totp_last_step = $2
+             WHERE id = $1`,
+            [request.userId, step, active],
+          );
+        } finally {
+          secret.fill(0);
         }
-        await db.query(
-          `UPDATE users SET totp_secret = totp_pending_secret, totp_pending_secret = NULL,
-             totp_last_step = $2
-           WHERE id = $1`,
-          [request.userId, step],
-        );
         return replaceRecoveryCodes(db, request.userId);
       });
       return { recovery_codes: recoveryCodes };
@@ -338,12 +362,16 @@ export function registerAccountRoutes(
         { requireSecondFactor: true },
       );
       await withTransaction(pool, async (db) => {
+        await db.query('SELECT 1 FROM users WHERE id = $1 FOR UPDATE', [request.userId]);
         await db.query(
           `UPDATE users SET totp_secret = NULL, totp_pending_secret = NULL, totp_last_step = 0
            WHERE id = $1`,
           [request.userId],
         );
-        await db.query('DELETE FROM totp_recovery_codes WHERE user_id = $1', [request.userId]);
+        // Recovery codes back up passkeys too; they go only with the last factor.
+        if (!secondFactorEnabled(await loadSecondFactorState(db, request.userId))) {
+          await db.query('DELETE FROM totp_recovery_codes WHERE user_id = $1', [request.userId]);
+        }
       });
       return reply.code(204).send();
     },
@@ -356,18 +384,16 @@ export function registerAccountRoutes(
       schema: { body: reauthBodySchema, response: { 200: recoveryCodesResponseSchema } },
     },
     async (request) => {
-      await verifyCurrentUser(
+      const { secondFactor } = await verifyCurrentUser(
         pool,
         config,
         request.userId,
         { ...request.body, current_auth_hash: decodeAuthHash(request.body.current_auth_hash) },
         { requireSecondFactor: true },
       );
-      const { rows } = await pool.query<{ enabled: boolean }>(
-        'SELECT totp_secret IS NOT NULL AS enabled FROM users WHERE id = $1',
-        [request.userId],
-      );
-      if (!rows[0]?.enabled) throw conflict('Two-factor authentication is off.');
+      if (!secondFactorEnabled(secondFactor)) {
+        throw conflict('Two-factor authentication is off.');
+      }
       return {
         recovery_codes: await withTransaction(pool, (db) =>
           replaceRecoveryCodes(db, request.userId),

@@ -1,9 +1,17 @@
 import { buildApp } from './app.js';
-import { loadConfig } from './config.js';
+import { loadConfig, type Config } from './config.js';
 import { createPool } from './db.js';
 import { migrate } from './migrate.js';
+import { prepareTotpSecrets } from './totp-reencrypt.js';
 
-const config = loadConfig();
+let config: Config;
+try {
+  config = loadConfig();
+} catch (error) {
+  // A configuration mistake: print just the message, not a stack trace.
+  console.error(`Invalid configuration: ${(error as Error).message}`);
+  process.exit(1);
+}
 const pool = createPool();
 const app = await buildApp({ pool, config });
 
@@ -15,6 +23,13 @@ if (config.preloginSecretIsEphemeral) {
 
 const applied = await migrate(pool);
 if (applied.length) app.log.info({ applied }, 'applied database migrations');
+
+// Before accepting requests: encrypt two-factor secrets stored in plaintext
+// before migration 005, and check every stored one is under a configured key.
+const totp = await prepareTotpSecrets(pool, config.totpKeys);
+if (totp.updated) {
+  app.log.info({ accounts: totp.updated }, 'encrypted legacy two-factor secrets');
+}
 
 app.addHook('onClose', async () => {
   await pool.end();

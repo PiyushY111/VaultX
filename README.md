@@ -18,8 +18,13 @@ vault, stay on your devices:
   and re-encrypts every item, and see or end every session.
 - **An encrypted vault manifest** lists every item and revision, so any
   device can tell when the server hides, adds or rolls back items.
-- **Optional two-factor login** (authenticator app codes, with recovery
-  codes), **account deletion**, and a printable **emergency kit**.
+- **Optional two-factor login**: authenticator app codes, or **passkeys**,
+  which can't be phished (with an option to require a passkey and turn
+  authenticator codes off), plus recovery codes. Also **account deletion**,
+  and a printable **emergency kit**. The
+  server keeps two-factor secrets encrypted under a key held outside the
+  database, so a leaked database or backup alone doesn't give them away (it
+  doesn't help if the server itself is compromised; see THREAT_MODEL.md §2).
 - **Import from Chrome, Firefox, Bitwarden or 1Password** (their CSV
   exports), and **export an encrypted backup** that restores into any
   VaultX account.
@@ -63,10 +68,26 @@ npm install
 
 ```sh
 cp .env.example .env
-# Edit .env and set POSTGRES_PASSWORD and PRELOGIN_SECRET, e.g.:
+# Edit .env and set POSTGRES_PASSWORD, PRELOGIN_SECRET and
+# TOTP_ENCRYPTION_KEY, each generated with:
 #   openssl rand -base64 32
 docker compose up -d --build
 ```
+
+The API won't start without a valid `TOTP_ENCRYPTION_KEY` (it encrypts
+two-factor secrets at rest). Keep it somewhere other than your database
+backups, and don't lose it: without it, nobody with two-factor on can log in.
+Upgrading an existing server? Add the key before restarting; on its first
+start the server encrypts the two-factor secrets stored in plaintext by
+earlier versions.
+
+Passkeys also need `WEBAUTHN_RP_ID` (the domain the web vault is served
+from, e.g. `vault.example.com`) and `WEBAUTHN_ORIGINS` (its exact origin,
+e.g. `https://vault.example.com`). The server checks both at startup and
+won't start without them. For local development, `.env.example` has
+`localhost` and `http://localhost:5173`. Changing the RP ID later stops
+every existing passkey working. Key rotation is described in
+[packages/server/README.md](packages/server/README.md#two-factor-secret-encryption).
 
 The API listens on `http://127.0.0.1:3000` (set `API_PORT` in `.env` to
 change it) and applies database migrations on startup. It speaks plain HTTP
@@ -108,6 +129,8 @@ npm test -w @password-manager/web
 npm test -w @password-manager/extension
 
 # End-to-end, against the running API:
+# The web suite's passkey test opens the vault at localhost:4173, so run the API with
+# WEBAUTHN_RP_ID=localhost WEBAUTHN_ORIGINS=http://localhost:4173
 API_URL=http://127.0.0.1:3000 npm run test:e2e -w @password-manager/web        # uses installed Chrome
 API_URL=http://127.0.0.1:3000 npm run test:e2e -w @password-manager/extension  # uses Playwright's Chromium
 ```
@@ -151,5 +174,6 @@ Other known gaps are documented in THREAT_MODEL.md and not yet scheduled:
 - proving to a brand-new device that it has the _latest_ copy of the vault
   (the manifest catches hidden, added and rolled-back items anywhere, but a
   whole consistent older copy can only be spotted by its "last changed" date)
-- phishing-resistant second factors (WebAuthn / passkeys); TOTP codes can be
-  phished like any typed code
+- passkeys in the browser extension (it keeps TOTP and recovery codes; see
+  THREAT_MODEL.md §5), and checking passkey attestation (any authenticator
+  is accepted today)

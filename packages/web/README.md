@@ -45,8 +45,15 @@ the app and API share an origin and no CORS is needed. In production, serve
   last changed.
 - **Two-factor login** is set up on the Security page (QR code, recovery
   codes); the login form asks for the code only after the password is right.
+- **Passkeys** (`src/lib/passkeys.ts`, `src/components/PasskeysSection.tsx`)
+  are added, renamed and removed on the Security page, with an option to
+  require one (TOTP codes then stop working). The login form offers the
+  passkey first, then TOTP if it's still allowed, then a recovery code.
+  Adding or removing a passkey takes the master password and an existing
+  second factor. The passkey never leaves the authenticator; the page only
+  passes the server's challenge to the browser and the signature back.
 - **Delete account** (Security page) needs the email typed out, the master
-  password, and a two-factor code if that's on.
+  password, and a second factor (passkey, or a code) if one is on.
 - **Emergency kit:** offered after signup and from the Security page, to
   print or download. It never contains the master password.
 - **Two-factor codes** (`src/lib/useTotp.ts`): an item's setup key or
@@ -85,3 +92,6 @@ API_URL=http://127.0.0.1:3000 npm run test:e2e -w @password-manager/web   # real
 
 The end-to-end tests build the production bundle, run it with `vite preview`,
 and need the API running (`docker compose up`) and Google Chrome installed.
+The passkey test uses Chrome's virtual authenticator and opens the vault at
+`http://localhost:4173` (WebAuthn doesn't accept IP addresses), so the API
+needs `WEBAUTHN_RP_ID=localhost WEBAUTHN_ORIGINS=http://localhost:4173`.

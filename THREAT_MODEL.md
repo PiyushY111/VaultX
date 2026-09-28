@@ -79,9 +79,13 @@ all traffic that reaches the server.
   to a device that hasn't seen a newer one; the vault shows when it last
   changed, so a person can notice.
 - **The two-factor secret is on the server.** It has to be, to check codes.
-  An operator (or database thief) who has it can generate codes, so
-  two-factor doesn't protect against the operator. It protects the vault's
-  ciphertext from someone who only has the password or auth hash.
+  It is encrypted at rest (§2), but under a key in the server's own
+  environment, so the operator, or anyone who controls the running server,
+  can decrypt it and generate codes. Passkeys don't change this: the server
+  holds only their public keys, but the operator can add a credential of
+  their own to any account, or run code that skips the check. Two-factor,
+  TOTP or passkey, doesn't protect against the operator. It protects the
+  vault's ciphertext from someone who only has the password or auth hash.
 - **Session metadata.** The session list stores each login's user agent and
   when it was last used.
 
@@ -101,6 +105,17 @@ control the running server.
   can't be used as sessions.
 - Items are encrypted under a random 256-bit vault key; the only way in is
   through the master password (Argon2id).
+- **Passkey rows are useless to a thief.** `webauthn_credentials` holds
+  public keys, which only verify signatures, and `webauthn_challenges` holds
+  random single-use values that expire in two minutes. A dump doesn't let
+  anyone sign as a passkey.
+- **Two-factor secrets are encrypted** (AES-256-GCM, since migration 005)
+  under `TOTP_ENCRYPTION_KEY`, which is kept in the server's environment, not
+  in the database. A database dump or backup on its own doesn't let the
+  attacker generate codes. Each ciphertext is bound to its user and column,
+  so write access to the database can't move one account's secret into
+  another. The leak tests also look for every TOTP secret (raw, base32,
+  base64, base64url, hex) and find none.
 
 **Not solved**
 
@@ -109,6 +124,25 @@ control the running server.
 - **Metadata exposure**, as in §1.
 - **Backups and logs** are the operator's responsibility. The API doesn't
   log request bodies or `Authorization` headers.
+- **Two-factor encryption only helps if the key isn't leaked with the
+  data.** It protects against a leak of the database alone. It doesn't
+  protect against:
+  - full server compromise: the key is in the process environment and
+    memory, so an attacker with code execution or the environment has it;
+  - a backup that bundles the database with the server's environment or
+    `.env` file;
+  - an attacker who can write to the database: they can't forge a working
+    secret, but they can set `totp_secret` to `NULL` (or insert a passkey
+    public key of their own into `webauthn_credentials`), which gets past
+    two-factor for that account. They still need the master password to log
+    in, and nothing here helps them decrypt the vault;
+  - old dumps: a copy taken before migration 005 (or before the server first
+    restarted after it) holds raw secrets. Rotating the key doesn't change
+    the secrets themselves, so for that the fix is users re-enrolling their
+    authenticator;
+  - a retired key: rotation re-encrypts the stored rows, but backups made
+    before it still open with the old key. Treat a retired key as secret for
+    as long as those backups exist.
 
 ## 3. Weak master password
 
@@ -130,6 +164,16 @@ control the running server.
   nothing to someone without the password. Wrong codes count toward the
   per-account lockout, each code works once, and turning it off, getting new
   recovery codes or deleting the account needs the password and a code.
+- **Passkeys (WebAuthn):** a phishing-resistant second factor. The browser
+  signs only for the origin the passkey was made on, and the server checks
+  that origin against `WEBAUTHN_ORIGINS`, and the RP ID. So a lookalike site
+  that relays the password in real time can't get a usable passkey
+  signature, the way it can relay a TOTP code. Each signature covers a
+  single-use, two-minute challenge bound to the account and to its purpose
+  (login, re-authentication or registration), so it can't be replayed or
+  spent elsewhere. User verification (PIN or biometric) is required.
+  Counters that go backwards are refused as possible clones. "Require
+  passkey" turns TOTP off as a factor, for login and account changes.
 - **Master password change** re-derives everything from a new password and
   rotates the vault key, re-encrypting every item (see §7 for why rotation,
   not just re-wrapping). Other sessions are ended.
@@ -155,8 +199,26 @@ control the running server.
   afterwards.
 - **Two-factor login is optional**, and protects server access to the
   ciphertext, not the offline attack: someone with a database copy can guess
-  passwords against it whether or not two-factor is on. TOTP codes can also
+  passwords against it whether or not two-factor is on. (Encrypting the
+  secrets at rest doesn't change that: guessing the master password offline
+  never involves the second factor.) TOTP codes can also
   be phished in real time, like any code a person types in.
+- **Passkeys are only as phishing-resistant as the weakest factor left on
+  the account.** Without "Require passkey", a phisher can ask for a TOTP
+  code instead. Even with it, **recovery codes can be phished**: they are
+  typed in, like TOTP codes. Keeping them offline is the user's job.
+- **What passkeys don't check:**
+  - **Attestation isn't verified** (`attestation: 'none'`), so any
+    authenticator is accepted, including software ones and passkeys synced
+    through a cloud account. A synced passkey is only as safe as that cloud
+    account.
+  - **User verification is reported by the authenticator.** The server can't
+    tell a real PIN check from a lying authenticator.
+  - **The counter check catches clones only on authenticators that keep a
+    counter.** Most synced passkeys always report 0.
+- **Changing `WEBAUTHN_RP_ID` breaks every passkey.** Passkeys are bound to
+  the RP ID they were made for. Users would need recovery codes to get back
+  in and register new ones.
 - **Lockout as denial of service.** Anyone who knows an email can trigger
   that account's 15-minute lockout, and keep re-triggering it. That's the
   inherent trade-off of per-account limits. The lockout is short, never
@@ -254,6 +316,13 @@ the extension interacts with.
   access to page content that we have. **Nothing in this project can protect
   against it; users must trust every extension they install.**
 
+- **The extension can't use passkeys.** WebAuthn from an extension popup is
+  unreliable, and passkeys are bound to the web vault's origin. The
+  extension keeps TOTP and recovery codes. For an account that is
+  passkey-only (or has "Require passkey" on), it says so and points to the
+  web vault, and the only way to unlock the extension itself is a recovery
+  code. Each unlock uses one up, so such accounts will want the web vault
+  for everyday use.
 - **A compromised browser (or browser profile) is out of scope.**
   Everything, including our service worker, runs inside it.
 - **XSS or a malicious page on the matching site.** Once a password is

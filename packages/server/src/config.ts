@@ -1,5 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import type { LoginThrottleConfig } from './login-throttle.js';
+import { parseTotpKeyring, type TotpKeyring } from './totp-secret-box.js';
+import { parseWebAuthnConfig, type WebAuthnConfig } from './webauthn-config.js';
 
 export interface Config {
   host: string;
@@ -16,6 +18,14 @@ export interface Config {
   preloginSecret: Buffer;
   /** True when PRELOGIN_SECRET was unset and a random per-process secret is in use. */
   preloginSecretIsEphemeral: boolean;
+  /**
+   * Encrypts two-factor secrets at rest (TOTP_ENCRYPTION_KEY). Required: a
+   * random per-process key would make every stored secret unreadable after a
+   * restart.
+   */
+  totpKeys: TotpKeyring;
+  /** Passkeys: RP ID, name and allowed origins (WEBAUTHN_*). Required. */
+  webauthn: WebAuthnConfig;
 }
 
 function readInt(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
@@ -43,5 +53,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     },
     preloginSecret: preloginSecret ? Buffer.from(preloginSecret, 'utf8') : randomBytes(32),
     preloginSecretIsEphemeral: !preloginSecret,
+    totpKeys: parseTotpKeyring(env.TOTP_ENCRYPTION_KEY),
+    webauthn: parseWebAuthnConfig(env),
   };
 }

@@ -46,6 +46,13 @@ After rebuilding, click the reload icon on the extension's card.
 - **Two-factor:** if the account has it on, the popup asks for the code after
   the password. The derived keys wait in the background worker's memory
   (never storage) for up to five minutes.
+- **No passkeys:** WebAuthn from an extension popup doesn't work reliably,
+  and passkeys are bound to the web vault's origin. The extension accepts
+  TOTP and recovery codes only. For an account that needs a passkey
+  (passkeys and no authenticator app, or "Require passkey" on), the popup
+  says so and points to the web vault. It still takes a recovery code, but
+  each one works once, so such accounts are better off unlocking in the web
+  vault.
 - **Logins only:** notes, cards and identities from the web vault are read
   and preserved (e.g. when a save prompt updates a login's password, its
   history is kept) but never listed, matched or filled.

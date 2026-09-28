@@ -1,4 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react';
+import type { SecondFactor } from '../api';
+import { getPasskeyAssertion } from '../lib/passkeys';
 import { SecondFactorRequiredError, logIn, type VaultSession } from '../vault/session';
 
 interface Props {
@@ -108,6 +110,8 @@ export function LoginForm({ lockedEmail, onUnlocked, onSwitchToSignup, onSwitchA
   );
 }
 
+type FactorMode = 'passkey' | 'totp' | 'recovery';
+
 function SecondFactorForm({
   pending,
   onUnlocked,
@@ -117,21 +121,21 @@ function SecondFactorForm({
   onUnlocked: (session: VaultSession) => void;
   onCancel: () => void;
 }) {
-  const [useRecovery, setUseRecovery] = useState(false);
+  const { methods } = pending.challenge;
+  const hasPasskey = methods.includes('webauthn');
+  const hasTotp = methods.includes('totp');
+  const [mode, setMode] = useState<FactorMode>(
+    hasPasskey ? 'passkey' : hasTotp ? 'totp' : 'recovery',
+  );
   const [code, setCode] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  async function handleSubmit(event: FormEvent) {
-    event.preventDefault();
+  async function send(factor: () => Promise<SecondFactor>) {
     setBusy(true);
     setError(null);
     try {
-      onUnlocked(
-        await pending.complete(
-          useRecovery ? { recovery_code: code.trim() } : { totp_code: code.trim() },
-        ),
-      );
+      onUnlocked(await pending.complete(await factor()));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Login failed');
       setCode('');
@@ -139,47 +143,76 @@ function SecondFactorForm({
     }
   }
 
+  function handleSubmit(event: FormEvent) {
+    event.preventDefault();
+    if (mode === 'passkey') {
+      return send(async () => {
+        const options = pending.challenge.webauthnOptions;
+        if (!options) throw new Error('The server didn’t send a passkey challenge. Try again.');
+        return { webauthn: await getPasskeyAssertion(options) };
+      });
+    }
+    const trimmed = code.trim();
+    return send(async () =>
+      mode === 'recovery' ? { recovery_code: trimmed } : { totp_code: trimmed },
+    );
+  }
+
+  function switchTo(next: FactorMode) {
+    setMode(next);
+    setCode('');
+    setError(null);
+  }
+
+  const others: [FactorMode, string][] = [];
+  if (hasPasskey && mode !== 'passkey') others.push(['passkey', 'Use a passkey']);
+  if (hasTotp && mode !== 'totp') others.push(['totp', 'Use my authenticator app']);
+  if (mode !== 'recovery') others.push(['recovery', 'Use a recovery code']);
+
   return (
     <form className="auth-form" onSubmit={handleSubmit} aria-label="Two-factor code">
-      <h2>Two-factor code</h2>
+      <h2>{mode === 'passkey' ? 'Confirm with a passkey' : 'Two-factor code'}</h2>
       <p className="lede">
-        {useRecovery
-          ? 'Enter one of your recovery codes. Each one works once.'
-          : 'Enter the 6-digit code from your authenticator app.'}
+        {mode === 'passkey'
+          ? 'Use the passkey you added for this account: your device will ask for your fingerprint, face, PIN or security key.'
+          : mode === 'recovery'
+            ? 'Enter one of your recovery codes. Each one works once.'
+            : 'Enter the 6-digit code from your authenticator app.'}
       </p>
-      <label>
-        {useRecovery ? 'Recovery code' : 'Authentication code'}
-        <input
-          key={useRecovery ? 'recovery' : 'totp'}
-          autoComplete="one-time-code"
-          inputMode={useRecovery ? 'text' : 'numeric'}
-          pattern={useRecovery ? undefined : '[0-9]{6}'}
-          required
-          autoFocus
-          value={code}
-          onChange={(e) => setCode(e.target.value)}
-        />
-      </label>
+      {mode !== 'passkey' && (
+        <label>
+          {mode === 'recovery' ? 'Recovery code' : 'Authentication code'}
+          <input
+            key={mode}
+            autoComplete="one-time-code"
+            inputMode={mode === 'recovery' ? 'text' : 'numeric'}
+            pattern={mode === 'recovery' ? undefined : '[0-9]{6}'}
+            required
+            autoFocus
+            value={code}
+            onChange={(e) => setCode(e.target.value)}
+          />
+        </label>
+      )}
       {error && (
         <p className="error" role="alert">
           {error}
         </p>
       )}
-      <button type="submit" className="btn btn-primary" disabled={busy}>
-        {busy ? 'Checking…' : 'Verify'}
+      <button
+        type="submit"
+        className="btn btn-primary"
+        disabled={busy}
+        autoFocus={mode === 'passkey'}
+      >
+        {busy ? 'Checking…' : mode === 'passkey' ? 'Use passkey' : 'Verify'}
       </button>
       <p className="links">
-        <button
-          type="button"
-          className="link"
-          onClick={() => {
-            setUseRecovery((v) => !v);
-            setCode('');
-            setError(null);
-          }}
-        >
-          {useRecovery ? 'Use my authenticator app' : 'Use a recovery code'}
-        </button>
+        {others.map(([next, label]) => (
+          <button key={next} type="button" className="link" onClick={() => switchTo(next)}>
+            {label}
+          </button>
+        ))}
         <button type="button" className="link" onClick={onCancel}>
           Cancel
         </button>

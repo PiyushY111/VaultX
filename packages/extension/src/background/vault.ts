@@ -26,6 +26,7 @@ import {
   createApi,
   describeLoginFailure,
   needsSecondFactor,
+  passkeyOnly,
   type Api,
   type ManifestPayload,
   type SecondFactor,
@@ -64,6 +65,14 @@ import type { KeyValueStore } from './storage';
 /** The password was right; the account needs a two-factor code ({@link Vault.unlockSecondFactor}). */
 export class SecondFactorRequiredError extends Error {
   override name = 'SecondFactorRequiredError';
+
+  constructor(
+    message: string,
+    /** Only a passkey or a recovery code will do; the extension can offer only the latter. */
+    readonly passkeyOnly = false,
+  ) {
+    super(message);
+  }
 }
 
 const NO_WARNINGS: VaultWarnings = {
@@ -225,7 +234,11 @@ export class Vault {
           ...keys,
           expiresAt: this.deps.now() + SECOND_FACTOR_TTL_MS,
         };
-        throw new SecondFactorRequiredError((error as Error).message);
+        const cause = (error as Error).cause;
+        throw new SecondFactorRequiredError(
+          (error as Error).message,
+          cause instanceof ApiError && passkeyOnly(cause),
+        );
       }
       throw error;
     } finally {

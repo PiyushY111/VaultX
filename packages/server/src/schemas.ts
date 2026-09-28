@@ -74,10 +74,75 @@ export const preloginBodySchema = {
 
 export const SESSION_CLIENTS = ['web', 'extension'] as const;
 
-/** A second factor: a 6-digit TOTP code, or one of the account's recovery codes. */
+const base64UrlSchema = (maxLength: number) =>
+  ({ type: 'string', pattern: '^[A-Za-z0-9_-]+$', minLength: 1, maxLength }) as const;
+
+/** Browser-supplied extension outputs; opaque here, but bounded. */
+const clientExtensionResultsSchema = { type: 'object', maxProperties: 16 } as const;
+
+/**
+ * A passkey assertion: navigator.credentials.get()'s result as JSON (the
+ * shape @simplewebauthn/browser produces). Sizes are generous upper bounds.
+ */
+export const webauthnAssertionSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['id', 'rawId', 'type', 'response', 'clientExtensionResults'],
+  properties: {
+    id: base64UrlSchema(1400),
+    rawId: base64UrlSchema(1400),
+    type: { type: 'string', const: 'public-key' },
+    authenticatorAttachment: { type: 'string', enum: ['platform', 'cross-platform'] },
+    clientExtensionResults: clientExtensionResultsSchema,
+    response: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['clientDataJSON', 'authenticatorData', 'signature'],
+      properties: {
+        clientDataJSON: base64UrlSchema(4096),
+        authenticatorData: base64UrlSchema(4096),
+        signature: base64UrlSchema(1024),
+        userHandle: base64UrlSchema(128),
+      },
+    },
+  },
+} as const;
+
+/** A new passkey: navigator.credentials.create()'s result as JSON. */
+export const webauthnAttestationSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['id', 'rawId', 'type', 'response', 'clientExtensionResults'],
+  properties: {
+    id: base64UrlSchema(1400),
+    rawId: base64UrlSchema(1400),
+    type: { type: 'string', const: 'public-key' },
+    authenticatorAttachment: { type: 'string', enum: ['platform', 'cross-platform'] },
+    clientExtensionResults: clientExtensionResultsSchema,
+    response: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['clientDataJSON', 'attestationObject'],
+      properties: {
+        clientDataJSON: base64UrlSchema(4096),
+        attestationObject: base64UrlSchema(16384),
+        authenticatorData: base64UrlSchema(8192),
+        publicKey: base64UrlSchema(4096),
+        publicKeyAlgorithm: { type: 'integer' },
+        transports: { type: 'array', maxItems: 8, items: { type: 'string', maxLength: 16 } },
+      },
+    },
+  },
+} as const;
+
+/**
+ * A second factor: a passkey assertion, a 6-digit TOTP code, or one of the
+ * account's recovery codes.
+ */
 export const secondFactorProperties = {
   totp_code: { type: 'string', pattern: '^[0-9]{6}$' },
   recovery_code: { type: 'string', minLength: 1, maxLength: 32 },
+  webauthn: webauthnAssertionSchema,
 } as const;
 
 export const loginBodySchema = {
@@ -334,6 +399,11 @@ export const reauthBodySchema = {
   properties: { current_auth_hash: base64Schema(AUTH_HASH_BYTES), ...secondFactorProperties },
 } as const;
 
+/**
+ * `totp_code` is from the new authenticator being set up. If the account
+ * already has a passkey, one of the existing factors (a passkey or a
+ * recovery code) is needed as well.
+ */
 export const enableTotpBodySchema = {
   type: 'object',
   additionalProperties: false,
@@ -341,17 +411,98 @@ export const enableTotpBodySchema = {
   properties: {
     current_auth_hash: base64Schema(AUTH_HASH_BYTES),
     totp_code: secondFactorProperties.totp_code,
+    recovery_code: secondFactorProperties.recovery_code,
+    webauthn: webauthnAssertionSchema,
   },
+} as const;
+
+const passkeyNameSchema = {
+  type: 'string',
+  minLength: 1,
+  maxLength: 64,
+  // Something visible: not only whitespace or control characters.
+  pattern: '^(?!\\s*$)[^\\p{Cc}]+$',
+} as const;
+
+export const passkeyRegisterFinishBodySchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['name', 'response'],
+  properties: { name: passkeyNameSchema, response: webauthnAttestationSchema },
+} as const;
+
+export const passkeyRenameBodySchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['name'],
+  properties: { name: passkeyNameSchema },
+} as const;
+
+export const passkeyRequiredBodySchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['current_auth_hash', 'required'],
+  properties: {
+    current_auth_hash: base64Schema(AUTH_HASH_BYTES),
+    required: { type: 'boolean' },
+    ...secondFactorProperties,
+  },
+} as const;
+
+const passkeySchema = {
+  type: 'object',
+  required: ['id', 'name', 'transports', 'created_at', 'last_used_at'],
+  properties: {
+    id: { type: 'string' },
+    name: { type: 'string' },
+    transports: { type: 'array', items: { type: 'string' } },
+    created_at: { type: 'string', format: 'date-time' },
+    last_used_at: { type: ['string', 'null'], format: 'date-time' },
+  },
+} as const;
+
+export const passkeyListResponseSchema = {
+  type: 'object',
+  required: ['passkeys'],
+  properties: { passkeys: { type: 'array', items: passkeySchema } },
+} as const;
+
+export const passkeyRegisteredResponseSchema = {
+  type: 'object',
+  required: ['passkey'],
+  properties: {
+    passkey: passkeySchema,
+    /** Only when this passkey is the account's first second factor. */
+    recovery_codes: { type: 'array', items: { type: 'string' } },
+  },
+} as const;
+
+/** WebAuthn options are generated by @simplewebauthn/server; passed through as-is. */
+export const webauthnOptionsResponseSchema = {
+  type: 'object',
+  required: ['options'],
+  properties: { options: { type: 'object', additionalProperties: true } },
 } as const;
 
 export const accountResponseSchema = {
   type: 'object',
-  required: ['email', 'created_at', 'totp_enabled', 'recovery_codes_remaining'],
+  required: [
+    'email',
+    'created_at',
+    'totp_enabled',
+    'recovery_codes_remaining',
+    'passkeys',
+    'passkey_required',
+  ],
   properties: {
     email: { type: 'string' },
     created_at: { type: 'string', format: 'date-time' },
     totp_enabled: { type: 'boolean' },
     recovery_codes_remaining: { type: 'integer' },
+    /** Number of registered passkeys. */
+    passkeys: { type: 'integer' },
+    /** "Require passkey": TOTP codes don't count as a second factor. */
+    passkey_required: { type: 'boolean' },
   },
 } as const;
 

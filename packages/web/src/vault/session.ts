@@ -13,6 +13,8 @@ import {
   api,
   describeLoginFailure,
   needsSecondFactor,
+  secondFactorChallenge,
+  type SecondFactorChallenge,
   type ItemResponse,
   type SecondFactor,
 } from '../api';
@@ -91,8 +93,8 @@ export async function signUp(emailInput: string, password: string): Promise<Vaul
 /**
  * Thrown by {@link logIn} when the password is right but the account has
  * two-factor login on. It holds the keys derived from the password, so the
- * code can be sent without running Argon2id again; call `complete` with the
- * code, or `cancel` to wipe them. They're wiped after five minutes anyway.
+ * second factor can be sent without running Argon2id again; call `complete`
+ * with it, or `cancel` to wipe them. They're wiped after five minutes anyway.
  */
 export class SecondFactorRequiredError extends Error {
   private keys: PasswordKeys | null;
@@ -102,6 +104,8 @@ export class SecondFactorRequiredError extends Error {
     private readonly email: string,
     keys: PasswordKeys,
     message: string,
+    /** Which factors the server accepts, and the current passkey challenge. */
+    public challenge: SecondFactorChallenge,
   ) {
     super(message);
     this.name = 'SecondFactorRequiredError';
@@ -109,12 +113,24 @@ export class SecondFactorRequiredError extends Error {
     this.timer = setTimeout(() => this.cancel(), 5 * 60_000);
   }
 
-  /** Sends the code. Throws (keeping the keys, to try another code) if it's refused. */
+  /**
+   * Sends the second factor. Throws (keeping the keys, to try again) if it's
+   * refused; the server's reply to a refusal carries a fresh passkey
+   * challenge, which replaces `challenge`.
+   */
   async complete(factor: SecondFactor): Promise<VaultSession> {
     if (!this.keys) throw new Error('This sign-in expired. Enter your master password again.');
-    const session = await finishLogIn(this.email, this.keys, factor);
-    this.cancel();
-    return session;
+    try {
+      const session = await finishLogIn(this.email, this.keys, factor);
+      this.cancel();
+      return session;
+    } catch (error) {
+      const cause = error instanceof Error ? error.cause : undefined;
+      if (cause instanceof ApiError && needsSecondFactor(cause)) {
+        this.challenge = secondFactorChallenge(cause);
+      }
+      throw error;
+    }
   }
 
   cancel(): void {
@@ -164,7 +180,15 @@ export async function logIn(emailInput: string, password: string): Promise<Vault
   } catch (error) {
     if (needsSecondFactor(error instanceof Error ? (error.cause ?? error) : error)) {
       handedOff = true;
-      throw new SecondFactorRequiredError(email, keys, (error as Error).message);
+      const cause = (error as Error).cause;
+      throw new SecondFactorRequiredError(
+        email,
+        keys,
+        (error as Error).message,
+        cause instanceof ApiError
+          ? secondFactorChallenge(cause)
+          : { methods: ['totp', 'recovery_code'], webauthnOptions: null },
+      );
     }
     throw error;
   } finally {

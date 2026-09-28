@@ -1,4 +1,10 @@
 import type { KdfParams } from '@password-manager/crypto';
+import type {
+  AuthenticationResponseJSON,
+  PublicKeyCredentialCreationOptionsJSON,
+  PublicKeyCredentialRequestOptionsJSON,
+  RegistrationResponseJSON,
+} from '@simplewebauthn/browser';
 
 /**
  * Thin HTTP client for the server API. Everything it sends is either public
@@ -41,12 +47,40 @@ export function describeLoginFailure(error: ApiError): string {
   return `${base} This account is now temporarily locked after too many failed attempts.`;
 }
 
-/** The password was right, and the account needs a two-factor code too. */
+/** The password was right, and the account needs a second factor too. */
 export const needsSecondFactor = (error: unknown): boolean =>
   error instanceof ApiError && error.details.totp_required === true;
 
-/** A second factor: a code from the authenticator app, or a recovery code. */
-export type SecondFactor = { totp_code: string } | { recovery_code: string };
+export type SecondFactorMethod = 'webauthn' | 'totp' | 'recovery_code';
+
+/** What a "second factor needed" reply offers: the methods that work, and passkey options. */
+export interface SecondFactorChallenge {
+  methods: SecondFactorMethod[];
+  webauthnOptions: PublicKeyCredentialRequestOptionsJSON | null;
+}
+
+const METHODS: readonly SecondFactorMethod[] = ['webauthn', 'totp', 'recovery_code'];
+
+/**
+ * Reads the second-factor fields of an error reply. Servers from before
+ * passkeys send only `totp_required`, which meant TOTP or a recovery code.
+ */
+export function secondFactorChallenge(error: ApiError): SecondFactorChallenge {
+  const { second_factor_methods: methods, webauthn_options: options } = error.details;
+  return {
+    methods: Array.isArray(methods)
+      ? METHODS.filter((method) => methods.includes(method))
+      : ['totp', 'recovery_code'],
+    webauthnOptions:
+      options && typeof options === 'object'
+        ? (options as PublicKeyCredentialRequestOptionsJSON)
+        : null,
+  };
+}
+
+/** A second factor: a passkey assertion, a code from the authenticator app, or a recovery code. */
+export type SecondFactor =
+  { webauthn: AuthenticationResponseJSON } | { totp_code: string } | { recovery_code: string };
 
 export interface SignupRequest {
   email: string;
@@ -100,13 +134,26 @@ export interface AccountInfo {
   created_at: string;
   totp_enabled: boolean;
   recovery_codes_remaining: number;
+  /** Number of registered passkeys. */
+  passkeys: number;
+  /** "Require passkey": TOTP codes no longer count as a second factor. */
+  passkey_required: boolean;
 }
 
 /** Re-authentication for sensitive account changes. */
 export type Reauth = { current_auth_hash: string } & Partial<{
   totp_code: string;
   recovery_code: string;
+  webauthn: AuthenticationResponseJSON;
 }>;
+
+export interface PasskeyInfo {
+  id: string;
+  name: string;
+  transports: string[];
+  created_at: string;
+  last_used_at: string | null;
+}
 
 export interface ItemResponse extends EncryptedItemPayload {
   id: string;
@@ -195,7 +242,7 @@ export const api = {
   getAccount: (token: string) => request<AccountInfo>('GET', '/account', { token }),
   setupTotp: (token: string) =>
     request<{ secret: string; otpauth_uri: string }>('POST', '/account/totp/setup', { token }),
-  enableTotp: (token: string, body: { current_auth_hash: string; totp_code: string }) =>
+  enableTotp: (token: string, body: Reauth & { totp_code: string }) =>
     request<{ recovery_codes: string[] }>('POST', '/account/totp/enable', { token, body }),
   disableTotp: (token: string, body: Reauth) =>
     request<void>('POST', '/account/totp/disable', { token, body }),
@@ -204,6 +251,34 @@ export const api = {
       token,
       body,
     }),
+  passkeyRegistrationOptions: (token: string, body: Reauth) =>
+    request<{ options: PublicKeyCredentialCreationOptionsJSON }>(
+      'POST',
+      '/account/passkeys/register/options',
+      { token, body },
+    ),
+  registerPasskey: (token: string, name: string, response: RegistrationResponseJSON) =>
+    request<{ passkey: PasskeyInfo; recovery_codes?: string[] }>('POST', '/account/passkeys', {
+      token,
+      body: { name, response },
+    }),
+  listPasskeys: (token: string) =>
+    request<{ passkeys: PasskeyInfo[] }>('GET', '/account/passkeys', { token }),
+  renamePasskey: (token: string, id: string, name: string) =>
+    request<{ passkey: PasskeyInfo }>('PATCH', `/account/passkeys/${encodeURIComponent(id)}`, {
+      token,
+      body: { name },
+    }),
+  deletePasskey: (token: string, id: string, body: Reauth) =>
+    request<void>('DELETE', `/account/passkeys/${encodeURIComponent(id)}`, { token, body }),
+  passkeyReauthOptions: (token: string) =>
+    request<{ options: PublicKeyCredentialRequestOptionsJSON }>(
+      'POST',
+      '/account/passkeys/reauth-options',
+      { token },
+    ),
+  setPasskeyRequired: (token: string, required: boolean, body: Reauth) =>
+    request<void>('PUT', '/account/passkeys/required', { token, body: { ...body, required } }),
   deleteAccount: (token: string, body: Reauth) =>
     request<void>('DELETE', '/account', { token, body }),
   listSessions: (token: string) =>

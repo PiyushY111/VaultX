@@ -26,6 +26,18 @@ export const needsSecondFactor = (error: unknown): boolean =>
 
 export type SecondFactor = { totp_code: string } | { recovery_code: string };
 
+/**
+ * True when the account's second factor must be a passkey (or a recovery
+ * code): it has "Require passkey" on, or passkeys and no authenticator app.
+ * The extension can't use passkeys (see README), so it says so and offers
+ * only a recovery code. Servers from before passkeys don't send
+ * `second_factor_methods`; for them TOTP always works.
+ */
+export function passkeyOnly(error: ApiError): boolean {
+  const methods = error.details.second_factor_methods;
+  return Array.isArray(methods) && methods.includes('webauthn') && !methods.includes('totp');
+}
+
 export function describeLoginFailure(error: ApiError): string {
   const { attempts_remaining: remaining, retry_after_seconds: retryAfter } = error.details;
   if (needsSecondFactor(error)) return error.message;

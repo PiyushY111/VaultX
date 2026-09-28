@@ -31,8 +31,8 @@ function watch(page: Page) {
   return { requests, errors };
 }
 
-async function signUp(page: Page, account: { email: string; password: string }) {
-  await page.goto('/');
+async function signUp(page: Page, account: { email: string; password: string }, url = '/') {
+  await page.goto(url);
   await page.getByRole('button', { name: 'Create an account' }).click();
   await page.getByLabel('Email').fill(account.email);
   await page.getByLabel('Master password', { exact: true }).fill(account.password);
@@ -281,4 +281,72 @@ test('imports a CSV and restores an encrypted backup into another account', asyn
       expect(request, `leaked "${secret}"`).not.toContain(secret);
     }
   }
+});
+
+// Passkeys need a real domain (WebAuthn refuses IP addresses as the RP ID), so
+// this test opens the vault at localhost. The API under test must allow it:
+// WEBAUTHN_RP_ID=localhost WEBAUTHN_ORIGINS=http://localhost:4173
+test('adds a passkey, unlocks with it, and removes it', async ({ page }) => {
+  const { requests } = watch(page);
+  // Chrome's virtual authenticator: a platform passkey that verifies the user.
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send('WebAuthn.enable');
+  const { authenticatorId } = await cdp.send('WebAuthn.addVirtualAuthenticator', {
+    options: {
+      protocol: 'ctap2',
+      transport: 'internal',
+      hasResidentKey: true,
+      hasUserVerification: true,
+      isUserVerified: true,
+      automaticPresenceSimulation: true,
+    },
+  });
+
+  const account = uniqueAccount();
+  await signUp(page, account, 'http://localhost:4173/');
+  await page.getByRole('button', { name: 'I’ve saved it' }).click();
+  await addItem(page);
+
+  await page.getByRole('button', { name: 'Security' }).click();
+  const passkeys = page.getByRole('region', { name: 'Passkeys' });
+  await passkeys.getByRole('button', { name: 'Add a passkey' }).click();
+  const add = passkeys.getByRole('form', { name: 'Add a passkey' });
+  await add.getByLabel('Passkey name').fill('E2E authenticator');
+  await add.getByLabel('Master password').fill(account.password);
+  await add.getByRole('button', { name: 'Create passkey' }).click();
+  const codes = passkeys.getByRole('region', { name: 'Recovery codes' });
+  await expect(codes.getByRole('listitem')).toHaveCount(10);
+  await codes.getByRole('button', { name: 'I’ve saved them' }).click();
+  await expect(passkeys.getByRole('listitem', { name: 'E2E authenticator' })).toBeVisible();
+  const { credentials } = await cdp.send('WebAuthn.getCredentials', { authenticatorId });
+  expect(credentials).toHaveLength(1);
+
+  // Unlocking now asks for the passkey after the password; no code field.
+  await page.getByRole('button', { name: 'Lock now' }).click();
+  await page.getByLabel('Master password').fill(account.password);
+  await page.getByRole('button', { name: 'Unlock' }).click();
+  const second = page.getByRole('form', { name: 'Two-factor code' });
+  await expect(second.getByLabel('Authentication code')).toHaveCount(0);
+  await second.getByRole('button', { name: 'Use passkey' }).click();
+  await expect(page.getByRole('listitem', { name: ITEM.site })).toBeVisible();
+
+  // The assertion went to /login; the master password never did.
+  const passkeyLogin = requests.find(
+    (r) => r.startsWith('POST') && r.includes('/api/login') && r.includes('"webauthn"'),
+  );
+  expect(passkeyLogin).toBeDefined();
+  for (const request of requests) expect(request).not.toContain(account.password);
+
+  // Removing it takes the password and the passkey; afterwards the password alone unlocks.
+  await page.getByRole('button', { name: 'Security' }).click();
+  await passkeys.getByRole('button', { name: 'Remove' }).click();
+  const remove = passkeys.getByRole('form', { name: 'Remove passkey' });
+  await remove.getByLabel('Master password').fill(account.password);
+  await remove.getByRole('button', { name: 'Remove passkey' }).click();
+  await expect(passkeys.getByRole('button', { name: 'Add a passkey' })).toBeVisible();
+  await expect(passkeys.getByRole('listitem')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Lock now' }).click();
+  await page.getByLabel('Master password').fill(account.password);
+  await page.getByRole('button', { name: 'Unlock' }).click();
+  await expect(page.getByRole('listitem', { name: ITEM.site })).toBeVisible();
 });

@@ -22,11 +22,24 @@ import { expect, inject } from 'vitest';
 import { buildApp } from '../src/app.js';
 import type { Config } from '../src/config.js';
 import { migrate } from '../src/migrate.js';
+import { parseTotpKeyring } from '../src/totp-secret-box.js';
 import { hotp, timeStep } from '../src/totp.js';
 
 export const b64 = (bytes: Uint8Array): string => Buffer.from(bytes).toString('base64');
 export const unb64 = (value: string): Uint8Array => new Uint8Array(Buffer.from(value, 'base64'));
 export const bearer = (token: string) => ({ authorization: `Bearer ${token}` });
+
+/** A fixed TOTP_ENCRYPTION_KEY value for tests (two keys, so decrypt-with-old paths exist). */
+export const TEST_TOTP_KEY = Buffer.alloc(32, 0x5a).toString('base64');
+export const TEST_TOTP_OLD_KEY = Buffer.alloc(32, 0xa5).toString('base64');
+export const testTotpKeys = () => parseTotpKeyring(`${TEST_TOTP_KEY},${TEST_TOTP_OLD_KEY}`);
+
+/** WebAuthn settings the tests' software authenticator signs for. */
+export const TEST_WEBAUTHN = {
+  rpId: 'vault.test',
+  rpName: 'VaultX test',
+  origins: ['https://vault.test'],
+};
 
 export interface TestContext {
   app: FastifyInstance;
@@ -62,6 +75,8 @@ export async function createTestContext(
     loginThrottle: { maxFailures: 5, windowSeconds: 900 },
     preloginSecret: Buffer.from('test-prelogin-secret'),
     preloginSecretIsEphemeral: false,
+    totpKeys: testTotpKeys(),
+    webauthn: TEST_WEBAUTHN,
     ...overrides,
   };
   const app = await buildApp({ pool, config, logger: false });
@@ -293,8 +308,8 @@ export async function createItem(
   return response.json<ItemResponse>();
 }
 
-/** The current TOTP code for a base32 secret, as an authenticator app would show it. */
-export function totpCode(base32Secret: string, offsetSteps = 0): string {
+/** Decodes an unpadded RFC 4648 base32 string, as an authenticator app would. */
+export function base32Decode(base32Secret: string): Buffer {
   const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
   let bits = 0;
   let value = 0;
@@ -307,7 +322,12 @@ export function totpCode(base32Secret: string, offsetSteps = 0): string {
       bits -= 8;
     }
   }
-  return hotp(Buffer.from(bytes), timeStep(Date.now()) + offsetSteps);
+  return Buffer.from(bytes);
+}
+
+/** The current TOTP code for a base32 secret, as an authenticator app would show it. */
+export function totpCode(base32Secret: string, offsetSteps = 0): string {
+  return hotp(base32Decode(base32Secret), timeStep(Date.now()) + offsetSteps);
 }
 
 export const bindingOf = (item: { id: string; revision: number }): ItemBinding => ({

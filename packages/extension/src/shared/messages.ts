@@ -104,6 +104,11 @@ export type Response<T> =
       locked?: boolean;
       /** The password was right; send a two-factor code with unlockSecondFactor. */
       secondFactor?: boolean;
+      /**
+       * The account needs a passkey (or a recovery code). Passkeys don't
+       * work from the extension, so the popup points to the web vault.
+       */
+      passkeyOnly?: boolean;
     };
 
 /** What the vault's integrity checks found on the last load. All zero for an honest server. */

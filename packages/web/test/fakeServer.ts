@@ -29,7 +29,46 @@ interface StoredUser {
   manifest: StoredManifest | null;
   totpEnabled: boolean;
   recoveryCodes: string[];
+  passkeys: StoredPasskey[];
+  passkeyRequired: boolean;
 }
+
+export interface StoredPasskey {
+  id: string;
+  /** The credential id the fake authenticator returns (see fakePasskeyResponse). */
+  credentialId: string;
+  name: string;
+  created_at: string;
+  last_used_at: string | null;
+}
+
+/**
+ * What the fake WebAuthn browser API returns: the credential id, and the
+ * server's challenge echoed back in clientDataJSON, as a real browser does.
+ * The fake server checks the challenge was one it issued and hasn't been used.
+ */
+export function fakePasskeyResponse(credentialId: string, challenge: string) {
+  const clientDataJSON = btoa(JSON.stringify({ challenge }))
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+  return {
+    id: credentialId,
+    rawId: credentialId,
+    type: 'public-key' as const,
+    clientExtensionResults: {},
+    response: { clientDataJSON, authenticatorData: 'AA', signature: 'AA' },
+  };
+}
+
+const challengeOf = (response: { response?: { clientDataJSON?: string } }): string | null => {
+  try {
+    const text = atob(response.response!.clientDataJSON!.replace(/-/g, '+').replace(/_/g, '/'));
+    return (JSON.parse(text) as { challenge?: string }).challenge ?? null;
+  } catch {
+    return null;
+  }
+};
 
 /** The fake's authenticator: this code is always valid when two-factor is on. */
 export const FAKE_TOTP_CODE = '123456';
@@ -71,6 +110,63 @@ export function installFakeServer(): FakeServer {
   const sessions: FakeServer['sessions'] = new Map();
   const breached: FakeServer['breached'] = new Map();
   let nextId = 1;
+  /** Open passkey challenges: challenge → the user and purpose it was issued for. */
+  const challenges = new Map<string, { email: string; purpose: 'login' | 'reauth' | 'register' }>();
+  const issueChallenge = (email: string, purpose: 'login' | 'reauth' | 'register') => {
+    const challenge = `challenge-${nextId++}`;
+    challenges.set(challenge, { email, purpose });
+    return challenge;
+  };
+  const requestOptions = (user: StoredUser, purpose: 'login' | 'reauth') => ({
+    rpId: 'localhost',
+    challenge: issueChallenge(user.email, purpose),
+    allowCredentials: user.passkeys.map((p) => ({ id: p.credentialId, type: 'public-key' })),
+    userVerification: 'required',
+    timeout: 120_000,
+  });
+  const methodsOf = (user: StoredUser) => [
+    ...(user.passkeys.length ? ['webauthn'] : []),
+    ...(user.totpEnabled && !user.passkeyRequired ? ['totp'] : []),
+    'recovery_code',
+  ];
+  const secondFactorDetails = (user: StoredUser, purpose: 'login' | 'reauth') => ({
+    totp_required: true,
+    second_factor_methods: methodsOf(user),
+    ...(user.passkeys.length && { webauthn_options: requestOptions(user, purpose) }),
+  });
+  /** Checks and uses up a second factor the way the real server does; null if accepted. */
+  const factorError = (
+    user: StoredUser,
+    factor: {
+      webauthn?: { id: string; response?: { clientDataJSON?: string } };
+      totp_code?: string;
+      recovery_code?: string;
+    },
+    purpose: 'login' | 'reauth',
+  ): string | null => {
+    if (factor.webauthn) {
+      const passkey = user.passkeys.find((p) => p.credentialId === factor.webauthn!.id);
+      const challenge = challengeOf(factor.webauthn);
+      const issued = challenge ? challenges.get(challenge) : undefined;
+      if (challenge) challenges.delete(challenge);
+      if (!passkey || issued?.email !== user.email || issued.purpose !== purpose) {
+        return 'That passkey wasn’t accepted. Try again.';
+      }
+      passkey.last_used_at = new Date().toISOString();
+      return null;
+    }
+    if (factor.totp_code) {
+      if (user.passkeyRequired) return 'This account requires a passkey.';
+      return user.totpEnabled && factor.totp_code === FAKE_TOTP_CODE
+        ? null
+        : 'That two-factor code is incorrect or was already used.';
+    }
+    const index = user.recoveryCodes.indexOf(factor.recovery_code ?? '');
+    if (index === -1) return 'That two-factor code is incorrect or was already used.';
+    user.recoveryCodes.splice(index, 1);
+    return null;
+  };
+  const hasSecondFactor = (user: StoredUser) => user.totpEnabled || user.passkeys.length > 0;
 
   const json = (status: number, body?: unknown) =>
     new Response(body === undefined ? null : JSON.stringify(body), {
@@ -129,6 +225,8 @@ export function installFakeServer(): FakeServer {
         manifest: null,
         totpEnabled: false,
         recoveryCodes: [],
+        passkeys: [],
+        passkeyRequired: false,
       });
       return json(201, { id: body.email });
     }
@@ -144,19 +242,21 @@ export function installFakeServer(): FakeServer {
       if (!user || user.authHash !== body.auth_hash) {
         return json(401, { message: 'Invalid email or auth hash' });
       }
-      if (user.totpEnabled) {
-        if (!body.totp_code && !body.recovery_code) {
-          return json(401, { message: 'Enter the 6-digit code.', totp_required: true });
-        }
-        const recoveryIndex = user.recoveryCodes.indexOf(body.recovery_code);
-        if (body.totp_code !== FAKE_TOTP_CODE && recoveryIndex === -1) {
+      if (hasSecondFactor(user)) {
+        if (!body.webauthn && !body.totp_code && !body.recovery_code) {
           return json(401, {
-            message: 'That two-factor code is incorrect or was already used.',
-            totp_required: true,
+            message: 'Enter the 6-digit code.',
+            ...secondFactorDetails(user, 'login'),
+          });
+        }
+        const error = factorError(user, body, 'login');
+        if (error) {
+          return json(401, {
+            message: error,
+            ...secondFactorDetails(user, 'login'),
             attempts_remaining: 4,
           });
         }
-        if (recoveryIndex !== -1) user.recoveryCodes.splice(recoveryIndex, 1);
       }
       const newToken = `token-${nextId++}`;
       sessions.set(newToken, {
@@ -176,15 +276,9 @@ export function installFakeServer(): FakeServer {
       if (body.current_auth_hash !== user.authHash) {
         return json(403, { message: 'Current master password is incorrect.' });
       }
-      if (needsFactor && user.totpEnabled) {
-        const index = user.recoveryCodes.indexOf(body.recovery_code);
-        if (body.totp_code !== FAKE_TOTP_CODE && index === -1) {
-          return json(403, {
-            message: 'That two-factor code is incorrect or was already used.',
-            totp_required: true,
-          });
-        }
-        if (index !== -1) user.recoveryCodes.splice(index, 1);
+      if (needsFactor && hasSecondFactor(user)) {
+        const error = factorError(user, body, 'reauth');
+        if (error) return json(403, { message: error, ...secondFactorDetails(user, 'reauth') });
       }
       return null;
     };
@@ -208,7 +302,90 @@ export function installFakeServer(): FakeServer {
         created_at: now,
         totp_enabled: user.totpEnabled,
         recovery_codes_remaining: user.recoveryCodes.length,
+        passkeys: user.passkeys.length,
+        passkey_required: user.passkeyRequired,
       });
+    }
+    if (method === 'POST' && path === '/account/passkeys/register/options') {
+      const failed = reauthFails(true);
+      if (failed) return failed;
+      return json(200, {
+        options: {
+          rp: { id: 'localhost', name: 'VaultX' },
+          user: { id: 'dXNlcg', name: user.email, displayName: '' },
+          challenge: issueChallenge(user.email, 'register'),
+          pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
+          excludeCredentials: user.passkeys.map((p) => ({
+            id: p.credentialId,
+            type: 'public-key',
+          })),
+          authenticatorSelection: { userVerification: 'required' },
+        },
+      });
+    }
+    if (method === 'POST' && path === '/account/passkeys') {
+      const challenge = challengeOf(body.response);
+      const issued = challenge ? challenges.get(challenge) : undefined;
+      if (challenge) challenges.delete(challenge);
+      if (issued?.email !== user.email || issued.purpose !== 'register') {
+        return json(400, { message: 'That passkey couldn’t be verified.' });
+      }
+      const first = !hasSecondFactor(user);
+      const passkey: StoredPasskey = {
+        id: crypto.randomUUID(),
+        credentialId: body.response.id,
+        name: body.name.trim(),
+        created_at: now,
+        last_used_at: null,
+      };
+      user.passkeys.push(passkey);
+      if (first) user.recoveryCodes = newCodes();
+      const { credentialId, ...info } = passkey;
+      void credentialId;
+      return json(201, {
+        passkey: { ...info, transports: ['internal'] },
+        ...(first && { recovery_codes: user.recoveryCodes }),
+      });
+    }
+    if (method === 'GET' && path === '/account/passkeys') {
+      return json(200, {
+        passkeys: user.passkeys.map(({ credentialId, ...info }) => {
+          void credentialId;
+          return { ...info, transports: ['internal'] };
+        }),
+      });
+    }
+    const passkeyPath = /^\/account\/passkeys\/([0-9a-f-]{36})$/.exec(path);
+    if (method === 'PATCH' && passkeyPath) {
+      const passkey = user.passkeys.find((p) => p.id === passkeyPath[1]);
+      if (!passkey) return json(404, { message: 'Passkey not found' });
+      passkey.name = body.name.trim();
+      return json(200, { passkey });
+    }
+    if (method === 'DELETE' && passkeyPath) {
+      const passkey = user.passkeys.find((p) => p.id === passkeyPath[1]);
+      if (!passkey) return json(404, { message: 'Passkey not found' });
+      if (user.passkeyRequired && user.passkeys.length === 1) {
+        return json(409, { message: 'Turn off “Require passkey” first.' });
+      }
+      const failed = reauthFails(true);
+      if (failed) return failed;
+      user.passkeys = user.passkeys.filter((p) => p !== passkey);
+      if (!hasSecondFactor(user)) user.recoveryCodes = [];
+      return noContent();
+    }
+    if (method === 'POST' && path === '/account/passkeys/reauth-options') {
+      if (!user.passkeys.length) return json(409, { message: 'This account has no passkeys.' });
+      return json(200, { options: requestOptions(user, 'reauth') });
+    }
+    if (method === 'PUT' && path === '/account/passkeys/required') {
+      if (body.required && !user.passkeys.length) {
+        return json(409, { message: 'Add a passkey first.' });
+      }
+      const failed = reauthFails(true);
+      if (failed) return failed;
+      user.passkeyRequired = body.required;
+      return noContent();
     }
     if (method === 'POST' && path === '/account/totp/setup') {
       if (user.totpEnabled)
@@ -219,8 +396,14 @@ export function installFakeServer(): FakeServer {
       });
     }
     if (method === 'POST' && path === '/account/totp/enable') {
+      // The new code proves the new app; an account with passkeys needs one of those too.
       const failed = reauthFails(false);
       if (failed) return failed;
+      if (user.passkeys.length) {
+        const { webauthn, recovery_code } = body;
+        const error = factorError(user, { webauthn, recovery_code }, 'reauth');
+        if (error) return json(403, { message: error, ...secondFactorDetails(user, 'reauth') });
+      }
       if (body.totp_code !== FAKE_TOTP_CODE)
         return json(403, { message: 'That code doesn’t match.' });
       user.totpEnabled = true;
@@ -231,7 +414,7 @@ export function installFakeServer(): FakeServer {
       const failed = reauthFails(true);
       if (failed) return failed;
       user.totpEnabled = false;
-      user.recoveryCodes = [];
+      if (!user.passkeys.length) user.recoveryCodes = [];
       return noContent();
     }
     if (method === 'POST' && path === '/account/totp/recovery-codes') {

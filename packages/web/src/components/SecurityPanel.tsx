@@ -1,7 +1,6 @@
 import type { VaultManifest } from '@password-manager/crypto';
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
-import { ApiError, api, type AccountInfo, type Reauth, type SessionInfo } from '../api';
-import { downloadText } from '../lib/download';
+import { ApiError, api, type AccountInfo, type SessionInfo } from '../api';
 import {
   MIN_MASTER_PASSWORD_SCORE,
   WEAK_MASTER_PASSWORD,
@@ -16,7 +15,17 @@ import {
   proveCurrentPassword,
   type VaultSession,
 } from '../vault/session';
+import { PasskeysSection } from './PasskeysSection';
 import { QrCode } from './QrCode';
+import {
+  RecoveryCodes,
+  SecondFactorField,
+  defaultFactorMode,
+  hasSecondFactor,
+  resolveSecondFactor,
+  useAccount,
+  type FactorMode,
+} from './securityShared';
 import { StrengthMeter } from './StrengthMeter';
 
 interface Props {
@@ -39,7 +48,17 @@ interface Props {
 const formatTime = (iso: string) =>
   new Date(iso).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
 
+/** What the account sections share: the account's second-factor state, and a way to refresh it. */
+export interface SectionProps extends Props {
+  account: AccountInfo | null;
+  reloadAccount: () => Promise<void>;
+}
+
 export function SecurityPanel(props: Props) {
+  // One copy of the account, so a change in one section (a new passkey, say)
+  // shows up in the others (the delete form then asks for a second factor).
+  const [account, reloadAccount] = useAccount(props.session, props.onSessionExpired);
+  const sectionProps: SectionProps = { ...props, account, reloadAccount };
   return (
     <section className="security" aria-label="Security">
       <div className="vault-head">
@@ -49,7 +68,8 @@ export function SecurityPanel(props: Props) {
         </button>
       </div>
       <ChangePasswordForm {...props} />
-      <TwoFactorSection {...props} />
+      <TwoFactorSection {...sectionProps} />
+      <PasskeysSection {...sectionProps} />
       <SessionList {...props} />
       <div className="sheet" role="region" aria-label="Emergency kit">
         <h3>Emergency kit</h3>
@@ -63,7 +83,7 @@ export function SecurityPanel(props: Props) {
           </button>
         </div>
       </div>
-      <DeleteAccountSection {...props} />
+      <DeleteAccountSection {...sectionProps} />
     </section>
   );
 }
@@ -283,78 +303,18 @@ function SessionList({ session, onSignedOutEverywhere, onSessionExpired }: Props
   );
 }
 
-/** A 6-digit code from the app, or anything else as a recovery code. */
-function secondFactorOf(code: string): Partial<Reauth> {
-  const trimmed = code.trim();
-  if (!trimmed) return {};
-  return /^\d{6}$/.test(trimmed) ? { totp_code: trimmed } : { recovery_code: trimmed };
-}
-
-function useAccount(session: VaultSession, onSessionExpired: () => void) {
-  const [account, setAccount] = useState<AccountInfo | null>(null);
-  const reload = useCallback(async () => {
-    try {
-      setAccount(await api.getAccount(session.token));
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 401) onSessionExpired();
-    }
-  }, [session, onSessionExpired]);
-  useEffect(() => {
-    void reload();
-  }, [reload]);
-  return [account, reload] as const;
-}
-
-function RecoveryCodes({ codes, onDone }: { codes: string[]; onDone: () => void }) {
-  const text = [
-    'VaultX two-factor recovery codes',
-    '',
-    'Each code works once, instead of a code from your authenticator app.',
-    '',
-    ...codes,
-    '',
-  ].join('\n');
-  return (
-    <div className="recovery" role="region" aria-label="Recovery codes">
-      <p className="warning">
-        Save these recovery codes somewhere safe. Each one lets you log in once without your
-        authenticator app. They won’t be shown again.
-      </p>
-      <ul className="recovery-codes">
-        {codes.map((code) => (
-          <li key={code}>{code}</li>
-        ))}
-      </ul>
-      <div className="row sheet-actions">
-        <button
-          type="button"
-          className="btn"
-          onClick={() => downloadText('VaultX recovery codes.txt', text)}
-        >
-          Download
-        </button>
-        <button type="button" className="btn" onClick={() => window.print()}>
-          Print
-        </button>
-        <button type="button" className="btn btn-primary" onClick={onDone}>
-          I’ve saved them
-        </button>
-      </div>
-    </div>
-  );
-}
-
 type TwoFactorStep =
   | { kind: 'idle' }
   | { kind: 'setup'; secret: string; uri: string }
   | { kind: 'codes'; codes: string[] }
   | { kind: 'reauth'; action: 'disable' | 'regenerate' };
 
-function TwoFactorSection({ session, onSessionExpired }: Props) {
-  const [account, reload] = useAccount(session, onSessionExpired);
+function TwoFactorSection({ session, onSessionExpired, account, reloadAccount }: SectionProps) {
   const [step, setStep] = useState<TwoFactorStep>({ kind: 'idle' });
   const [password, setPassword] = useState('');
   const [code, setCode] = useState('');
+  const [newCode, setNewCode] = useState('');
+  const [mode, setMode] = useState<FactorMode>(defaultFactorMode(account));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -362,6 +322,8 @@ function TwoFactorSection({ session, onSessionExpired }: Props) {
     setStep(next);
     setPassword('');
     setCode('');
+    setNewCode('');
+    setMode(defaultFactorMode(account));
     setError(null);
   }
 
@@ -386,25 +348,33 @@ function TwoFactorSection({ session, onSessionExpired }: Props) {
 
   const confirmSetup = (event: FormEvent) => {
     event.preventDefault();
-    const [submitted, totp] = [password, code.trim()];
+    const [submitted, totp] = [password, newCode.trim()];
     setPassword('');
     return run(async () => {
       const authHash = await proveCurrentPassword(session, submitted);
+      // With a passkey on the account, adding TOTP takes one of the existing factors too.
+      const existing = hasSecondFactor(account)
+        ? await resolveSecondFactor(session, mode, code)
+        : {};
       const { recovery_codes } = await api.enableTotp(session.token, {
         current_auth_hash: authHash,
+        ...existing,
         totp_code: totp,
       });
       reset({ kind: 'codes', codes: recovery_codes });
-      await reload();
+      await reloadAccount();
     });
   };
 
   const confirmReauth = (action: 'disable' | 'regenerate') => (event: FormEvent) => {
     event.preventDefault();
-    const [submitted, factor] = [password, secondFactorOf(code)];
+    const submitted = password;
     setPassword('');
     return run(async () => {
-      const body = { current_auth_hash: await proveCurrentPassword(session, submitted), ...factor };
+      const body = {
+        current_auth_hash: await proveCurrentPassword(session, submitted),
+        ...(await resolveSecondFactor(session, mode, code)),
+      };
       if (action === 'disable') {
         await api.disableTotp(session.token, body);
         reset();
@@ -412,7 +382,7 @@ function TwoFactorSection({ session, onSessionExpired }: Props) {
         const { recovery_codes } = await api.regenerateRecoveryCodes(session.token, body);
         reset({ kind: 'codes', codes: recovery_codes });
       }
-      await reload();
+      await reloadAccount();
     });
   };
 
@@ -428,10 +398,25 @@ function TwoFactorSection({ session, onSessionExpired }: Props) {
       />
     </label>
   );
+  const factorField = account && (
+    <SecondFactorField
+      account={account}
+      mode={mode}
+      onModeChange={setMode}
+      code={code}
+      onCodeChange={setCode}
+    />
+  );
   const errorLine = error && (
     <p className="error" role="alert">
       {error}
     </p>
+  );
+  const codesLeft = account && (
+    <>
+      {account.recovery_codes_remaining} recovery code
+      {account.recovery_codes_remaining === 1 ? '' : 's'} left.
+    </>
   );
 
   return (
@@ -440,6 +425,7 @@ function TwoFactorSection({ session, onSessionExpired }: Props) {
       <p className="hint">
         Asks for a 6-digit code from an authenticator app (such as Google Authenticator, 1Password
         or Aegis) each time you log in, so a stolen master password isn’t enough on its own.
+        Passkeys, below, do the same job and can’t be phished.
       </p>
       {account === null ? (
         <p className="quiet-state">Loading…</p>
@@ -460,11 +446,12 @@ function TwoFactorSection({ session, onSessionExpired }: Props) {
               autoComplete="one-time-code"
               pattern="[0-9]{6}"
               required
-              value={code}
-              onChange={(e) => setCode(e.target.value)}
+              value={newCode}
+              onChange={(e) => setNewCode(e.target.value)}
             />
           </label>
           {passwordField}
+          {hasSecondFactor(account) && factorField}
           {errorLine}
           <div className="row sheet-actions">
             <button type="submit" className="btn btn-primary" disabled={busy}>
@@ -483,15 +470,7 @@ function TwoFactorSection({ session, onSessionExpired }: Props) {
           }
         >
           {passwordField}
-          <label>
-            Code from your app, or a recovery code
-            <input
-              autoComplete="one-time-code"
-              required
-              value={code}
-              onChange={(e) => setCode(e.target.value)}
-            />
-          </label>
+          {factorField}
           {errorLine}
           <div className="row sheet-actions">
             <button type="submit" className="btn btn-primary" disabled={busy}>
@@ -506,37 +485,49 @@ function TwoFactorSection({ session, onSessionExpired }: Props) {
             </button>
           </div>
         </form>
-      ) : account.totp_enabled ? (
-        <>
-          <p className="notice" role="status">
-            Two-factor login is on. {account.recovery_codes_remaining} recovery code
-            {account.recovery_codes_remaining === 1 ? '' : 's'} left.
-          </p>
-          {errorLine}
-          <div className="row sheet-actions">
-            <button
-              type="button"
-              className="btn"
-              onClick={() => reset({ kind: 'reauth', action: 'regenerate' })}
-            >
-              New recovery codes
-            </button>
-            <button
-              type="button"
-              className="btn btn-danger"
-              onClick={() => reset({ kind: 'reauth', action: 'disable' })}
-            >
-              Turn off
-            </button>
-          </div>
-        </>
       ) : (
         <>
+          {account.totp_enabled ? (
+            <p className="notice" role="status">
+              Two-factor login is on. {codesLeft}
+            </p>
+          ) : (
+            account.passkeys > 0 && (
+              <p className="notice" role="status">
+                Two-factor login is on with your passkeys; no authenticator app. {codesLeft}
+              </p>
+            )
+          )}
           {errorLine}
           <div className="row sheet-actions">
-            <button type="button" className="btn btn-primary" onClick={startSetup} disabled={busy}>
-              Set up two-factor login
-            </button>
+            {!account.totp_enabled && (
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={startSetup}
+                disabled={busy}
+              >
+                Set up two-factor login
+              </button>
+            )}
+            {hasSecondFactor(account) && (
+              <button
+                type="button"
+                className="btn"
+                onClick={() => reset({ kind: 'reauth', action: 'regenerate' })}
+              >
+                New recovery codes
+              </button>
+            )}
+            {account.totp_enabled && (
+              <button
+                type="button"
+                className="btn btn-danger"
+                onClick={() => reset({ kind: 'reauth', action: 'disable' })}
+              >
+                Turn off
+              </button>
+            )}
           </div>
         </>
       )}
@@ -544,13 +535,20 @@ function TwoFactorSection({ session, onSessionExpired }: Props) {
   );
 }
 
-function DeleteAccountSection({ session, onAccountDeleted, onSessionExpired }: Props) {
-  const [account] = useAccount(session, onSessionExpired);
+function DeleteAccountSection({
+  session,
+  onAccountDeleted,
+  onSessionExpired,
+  account,
+}: SectionProps) {
   const [confirmEmail, setConfirmEmail] = useState('');
   const [password, setPassword] = useState('');
   const [code, setCode] = useState('');
+  const [mode, setMode] = useState<FactorMode>(defaultFactorMode(account));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => setMode(defaultFactorMode(account)), [account]);
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
@@ -566,7 +564,7 @@ function DeleteAccountSection({ session, onAccountDeleted, onSessionExpired }: P
       const authHash = await proveCurrentPassword(session, submitted);
       await api.deleteAccount(session.token, {
         current_auth_hash: authHash,
-        ...secondFactorOf(code),
+        ...(hasSecondFactor(account) ? await resolveSecondFactor(session, mode, code) : {}),
       });
       onAccountDeleted();
     } catch (err) {
@@ -603,16 +601,14 @@ function DeleteAccountSection({ session, onAccountDeleted, onSessionExpired }: P
           onChange={(e) => setPassword(e.target.value)}
         />
       </label>
-      {account?.totp_enabled && (
-        <label>
-          Code from your app, or a recovery code
-          <input
-            autoComplete="one-time-code"
-            required
-            value={code}
-            onChange={(e) => setCode(e.target.value)}
-          />
-        </label>
+      {account && hasSecondFactor(account) && (
+        <SecondFactorField
+          account={account}
+          mode={mode}
+          onModeChange={setMode}
+          code={code}
+          onCodeChange={setCode}
+        />
       )}
       {error && (
         <p className="error" role="alert">

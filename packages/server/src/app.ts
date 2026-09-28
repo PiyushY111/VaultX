@@ -6,6 +6,7 @@ import type { Config } from './config.js';
 import { BODY_LIMIT_BYTES } from './limits.js';
 import { registerAccountRoutes } from './routes/account.js';
 import { registerAuthRoutes } from './routes/auth.js';
+import { registerPasskeyRoutes } from './routes/passkeys.js';
 import { registerVaultRoutes } from './routes/vault.js';
 
 export interface AppOptions {
@@ -54,6 +55,7 @@ export async function buildApp({ pool, config, logger }: AppOptions): Promise<Fa
   const authenticate = createAuthenticate(pool);
   registerVaultRoutes(app, pool, authenticate);
   registerAccountRoutes(app, pool, config, authenticate);
+  registerPasskeyRoutes(app, pool, config, authenticate);
 
   return app;
 }

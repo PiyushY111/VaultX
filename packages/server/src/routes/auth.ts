@@ -28,7 +28,15 @@ import {
   generateSessionToken,
   hashAuthHash,
 } from '../tokens.js';
-import { SECOND_FACTOR_REQUIRED, consumeSecondFactor, type SecondFactor } from '../verify-user.js';
+import {
+  checkSecondFactor,
+  hasSecondFactor,
+  loadSecondFactorState,
+  secondFactorDetails,
+  secondFactorEnabled,
+  secondFactorPrompt,
+  type SecondFactor,
+} from '../verify-user.js';
 
 interface SignupBody {
   email: string;
@@ -133,8 +141,8 @@ export function registerAuthRoutes(app: FastifyInstance, pool: pg.Pool, config: 
         );
       }
 
-      const { rows } = await pool.query<{ id: string; auth_hash: Buffer; totp_enabled: boolean }>(
-        'SELECT id, auth_hash, totp_secret IS NOT NULL AS totp_enabled FROM users WHERE email = $1',
+      const { rows } = await pool.query<{ id: string; auth_hash: Buffer }>(
+        'SELECT id, auth_hash FROM users WHERE email = $1',
         [email],
       );
       const user = rows[0];
@@ -153,17 +161,30 @@ export function registerAuthRoutes(app: FastifyInstance, pool: pg.Pool, config: 
 
       // Only now, with the password proven, is two-factor mentioned at all,
       // so it reveals nothing about accounts to someone without the password.
-      if (user.totp_enabled) {
-        if (!request.body.totp_code && !request.body.recovery_code) {
-          // Asking for the code isn't a failed attempt.
+      const state = await loadSecondFactorState(pool, user.id);
+      if (secondFactorEnabled(state)) {
+        const factor = request.body;
+        if (!hasSecondFactor(factor)) {
+          // Asking for the second factor isn't a failed attempt.
           await refundLoginAttempt(pool, email);
-          throw unauthorized(SECOND_FACTOR_REQUIRED, { totp_required: true });
-        }
-        if (!(await consumeSecondFactor(pool, user.id, request.body))) {
-          const remaining = attempt.attemptsRemaining;
           throw unauthorized(
-            `That two-factor code is incorrect or was already used. ${remaining} attempt${remaining === 1 ? '' : 's'} left before this account is temporarily locked.`,
-            { totp_required: true, attempts_remaining: remaining },
+            secondFactorPrompt(state),
+            await secondFactorDetails(pool, config, user.id, state, 'login'),
+          );
+        }
+        const check = await checkSecondFactor(pool, config, user.id, state, factor, 'login');
+        if (!check.ok) {
+          const remaining = attempt.attemptsRemaining;
+          if (factor.webauthn) {
+            request.log.warn({ userId: user.id, reason: check.message }, 'passkey login refused');
+          }
+          throw unauthorized(
+            `${check.message} ${remaining} attempt${remaining === 1 ? '' : 's'} left before this account is temporarily locked.`,
+            {
+              // Fresh passkey options, so the client can try again.
+              ...(await secondFactorDetails(pool, config, user.id, state, 'login')),
+              attempts_remaining: remaining,
+            },
           );
         }
       }

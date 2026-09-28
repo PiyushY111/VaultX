@@ -23,6 +23,8 @@ describe('migrations', () => {
       '002_login_failures.sql',
       '003_item_revisions_and_sessions.sql',
       '004_manifest_and_two_factor.sql',
+      '005_encrypt_totp_secrets.sql',
+      '006_webauthn.sql',
     ]);
     expect(await migrate(ctx.pool)).toEqual([]);
   });
@@ -49,6 +51,8 @@ describe('migrations', () => {
       expect(await migrate(fresh.pool)).toEqual([
         '003_item_revisions_and_sessions.sql',
         '004_manifest_and_two_factor.sql',
+        '005_encrypt_totp_secrets.sql',
+        '006_webauthn.sql',
       ]);
       const { rows: items } = await fresh.pool.query('SELECT revision FROM vault_items');
       expect(items).toEqual([{ revision: 0 }]);
@@ -107,6 +111,7 @@ describe('migrations', () => {
       'users.totp_secret:bytea',
       'users.totp_pending_secret:bytea',
       'users.totp_last_step:bigint',
+      'users.webauthn_required:boolean',
       'vault_items.id:uuid',
       'vault_items.user_id:uuid',
       'vault_items.encrypted_data:bytea',

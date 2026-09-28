@@ -97,7 +97,12 @@ export async function handleMessage(
   } catch (error) {
     if (error instanceof LockedError) return { ok: false, error: error.message, locked: true };
     if (error instanceof SecondFactorRequiredError) {
-      return { ok: false, error: error.message, secondFactor: true };
+      return {
+        ok: false,
+        error: error.message,
+        secondFactor: true,
+        ...(error.passkeyOnly && { passkeyOnly: true }),
+      };
     }
     return { ok: false, error: error instanceof Error ? error.message : 'Unexpected error' };
   }

@@ -219,7 +219,7 @@ cp .env.example .env</code>
             <span class="step-index">2</span>
             <div class="step-body">
               <h4>Set secrets in <code>.env</code></h4>
-              <p>Generate 32-byte secrets for <code>POSTGRES_PASSWORD</code> and <code>PRELOGIN_SECRET</code>:</p>
+              <p>Generate 32-byte secrets for <code>POSTGRES_PASSWORD</code>, <code>PRELOGIN_SECRET</code> and <code>TOTP_ENCRYPTION_KEY</code>:</p>
               <div class="cmd-row">
                 <code>openssl rand -base64 32</code>
                 <button type="button" class="copy-btn" data-copy="openssl rand -base64 32">Copy</button>

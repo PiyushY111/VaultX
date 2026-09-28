@@ -57,6 +57,8 @@ export function createFakeServer() {
     manifest: null as StoredManifest | null,
     twoFactor: false,
     recoveryCodes: [] as string[],
+    /** "Require passkey" on the web vault: TOTP no longer counts. */
+    passkeyOnly: false,
   };
   /** Applies a write's manifest if it's the next version, like the real server. */
   const manifestConflict = (manifest: StoredManifest | undefined) => {
@@ -100,11 +102,22 @@ export function createFakeServer() {
         return json(401, { message: 'Invalid email or auth hash' });
       if (state.twoFactor) {
         const index = state.recoveryCodes.indexOf(body.recovery_code);
+        // As the real server: the accepted methods, and passkey options (unused here).
+        const details = {
+          totp_required: true,
+          second_factor_methods: state.passkeyOnly
+            ? ['webauthn', 'recovery_code']
+            : ['totp', 'recovery_code'],
+          ...(state.passkeyOnly && {
+            webauthn_options: { challenge: 'unused', rpId: 'localhost' },
+          }),
+        };
         if (!body.totp_code && !body.recovery_code) {
-          return json(401, { message: 'Enter the 6-digit code.', totp_required: true });
+          return json(401, { message: 'Enter the 6-digit code.', ...details });
         }
-        if (body.totp_code !== FAKE_TOTP_CODE && index === -1) {
-          return json(401, { message: 'That two-factor code is incorrect.', totp_required: true });
+        const totpOk = body.totp_code === FAKE_TOTP_CODE && !state.passkeyOnly;
+        if (!totpOk && index === -1) {
+          return json(401, { message: 'That two-factor code is incorrect.', ...details });
         }
         if (index !== -1) state.recoveryCodes.splice(index, 1);
       }
@@ -168,6 +181,12 @@ export function createFakeServer() {
     expireSessions: () => tokens.clear(),
     enableTwoFactor(recoveryCodes: string[] = ['RECOV-ERY01']) {
       state.twoFactor = true;
+      state.recoveryCodes = [...recoveryCodes];
+    },
+    /** An account whose second factor must be a passkey (or a recovery code). */
+    requirePasskey(recoveryCodes: string[] = ['RECOV-ERY01']) {
+      state.twoFactor = true;
+      state.passkeyOnly = true;
       state.recoveryCodes = [...recoveryCodes];
     },
     /** Registers an account the way the web vault would; returns its vault key for seeding items. */

@@ -178,10 +178,9 @@ describe('handleMessage authorization', () => {
       }),
     };
     const unlock = { type: 'unlock', email: 'b@example.com', password: 'MASTER-password-123' };
-    expect(await handleMessage(unlock, popup, twoFactorDeps)).toMatchObject({
-      ok: false,
-      secondFactor: true,
-    });
+    const reply = await handleMessage(unlock, popup, twoFactorDeps);
+    expect(reply).toMatchObject({ ok: false, secondFactor: true });
+    expect(reply).not.toHaveProperty('passkeyOnly');
     expect(
       await handleMessage(
         { type: 'unlockSecondFactor', code: FAKE_TOTP_CODE, recovery: false },
@@ -193,6 +192,29 @@ describe('handleMessage authorization', () => {
     expect(await handleMessage({ type: 'getWarnings' }, popup, twoFactorDeps)).toMatchObject({
       ok: true,
       data: { missing: 0 },
+    });
+  });
+
+  it('tells the popup when the account needs a passkey, which the extension can’t use', async () => {
+    const server = createFakeServer();
+    await server.register('c@example.com', 'MASTER-password-123');
+    server.requirePasskey();
+    const passkeyDeps: RouterDeps = {
+      ...deps,
+      settingsStore: new MemoryStore(),
+      vault: new Vault({
+        session: new MemoryStore(),
+        local: new MemoryStore(),
+        fetch: server.fetch,
+        now: () => Date.now(),
+        getSettings: async () => ({ ...DEFAULT_SETTINGS, serverUrl: SERVER }),
+      }),
+    };
+    const unlock = { type: 'unlock', email: 'c@example.com', password: 'MASTER-password-123' };
+    expect(await handleMessage(unlock, popup, passkeyDeps)).toMatchObject({
+      ok: false,
+      secondFactor: true,
+      passkeyOnly: true,
     });
   });
 

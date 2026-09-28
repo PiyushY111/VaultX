@@ -28,6 +28,8 @@ class RequestError extends Error {
     readonly locked: boolean,
     /** The password was right and a two-factor code is needed next. */
     readonly secondFactor = false,
+    /** ...and it has to be a passkey or recovery code (the extension can't use passkeys). */
+    readonly passkeyOnly = false,
   ) {
     super(message);
   }
@@ -40,6 +42,7 @@ async function send<T>(request: PopupRequest): Promise<T> {
       response.error,
       response.locked === true,
       response.secondFactor === true,
+      response.passkeyOnly === true,
     );
   }
   return response.data;
@@ -135,7 +138,7 @@ function renderUnlock(state: VaultState, message?: string): void {
           await render();
         } catch (err) {
           if (err instanceof RequestError && err.secondFactor) {
-            renderSecondFactor(state);
+            renderSecondFactor(state, err.passkeyOnly);
             return;
           }
           error.textContent = errorText(err);
@@ -178,17 +181,36 @@ function renderUnlock(state: VaultState, message?: string): void {
   (state.email ? password : email).focus();
 }
 
-/** The second step of unlocking when the account has two-factor login on. */
-function renderSecondFactor(state: VaultState): void {
-  let recovery = false;
+/**
+ * The second step of unlocking when the account has two-factor login on.
+ * Passkeys can't be used from the extension (WebAuthn from an extension
+ * popup is unreliable, and passkeys are bound to the web vault's origin),
+ * so a passkey-only account is told to use the web vault, and can still
+ * unlock here with a recovery code.
+ */
+function renderSecondFactor(state: VaultState, passkeyOnly = false): void {
+  let recovery = passkeyOnly;
   const code = h('input', {
     name: 'code',
     required: true,
     autocomplete: 'one-time-code',
-    inputmode: 'numeric',
+    inputmode: recovery ? 'text' : 'numeric',
   });
-  const label = h('label', {}, 'Authentication code', code);
-  const hint = h('p', { class: 'muted' }, 'Enter the 6-digit code from your authenticator app.');
+  const label = h('label', {}, recovery ? 'Recovery code' : 'Authentication code', code);
+  const hint = h(
+    'p',
+    { class: 'muted' },
+    recovery
+      ? 'Enter one of your recovery codes. Each one works once.'
+      : 'Enter the 6-digit code from your authenticator app.',
+  );
+  const passkeyNotice =
+    passkeyOnly &&
+    h(
+      'p',
+      { class: 'notice', role: 'status' },
+      'This account signs in with a passkey, and passkeys don’t work in the extension. Log in with your passkey in the web vault instead, or use a recovery code here.',
+    );
   const error = h('p', { class: 'error', role: 'alert' });
   const submit = h('button', { type: 'submit', class: 'btn btn-primary' }, 'Verify');
   const toggle = h(
@@ -235,7 +257,8 @@ function renderSecondFactor(state: VaultState): void {
           }
         },
       },
-      h('h2', { class: 'title' }, 'Two-factor code'),
+      h('h2', { class: 'title' }, passkeyOnly ? 'Passkey required' : 'Two-factor code'),
+      passkeyNotice,
       hint,
       label,
       error,
@@ -243,7 +266,8 @@ function renderSecondFactor(state: VaultState): void {
         'div',
         { class: 'row' },
         submit,
-        toggle,
+        // With a passkey-only account there's nothing to toggle to.
+        !passkeyOnly && toggle,
         h(
           'button',
           { type: 'button', class: 'btn btn-quiet', onclick: () => renderUnlock(state) },

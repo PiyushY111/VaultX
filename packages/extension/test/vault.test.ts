@@ -416,6 +416,27 @@ describe('two-factor unlock', () => {
   });
 });
 
+describe('passkey-only accounts', () => {
+  it('says the account needs a passkey, refuses TOTP, and still takes a recovery code', async () => {
+    server.requirePasskey(['RECOV-ERY01']);
+    const vault = makeVault();
+    const error = await vault.unlock(EMAIL, PASSWORD).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(SecondFactorRequiredError);
+    expect((error as SecondFactorRequiredError).passkeyOnly).toBe(true);
+    await expect(vault.unlockSecondFactor(FAKE_TOTP_CODE, false)).rejects.toThrow(/incorrect/);
+    await vault.unlockSecondFactor('RECOV-ERY01', true);
+    expect(await vault.isUnlocked()).toBe(true);
+  });
+
+  it('isn’t passkey-only when TOTP is accepted', async () => {
+    server.enableTwoFactor();
+    const error = await makeVault()
+      .unlock(EMAIL, PASSWORD)
+      .catch((e: unknown) => e);
+    expect((error as SecondFactorRequiredError).passkeyOnly).toBe(false);
+  });
+});
+
 describe('vault manifest', () => {
   it('writes a first manifest on load, and moves it on with every save', async () => {
     const vault = makeVault();
