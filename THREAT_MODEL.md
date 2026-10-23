@@ -322,7 +322,10 @@ the extension interacts with.
   pages can't read. The content script bundle contains no crypto code, and
   the build fails if it does.
 - **Credentials only go to their own domain, on request.** Autofill never
-  happens without a trusted click (`event.isTrusted`), runs only in the top
+  happens without a trusted user action: a click on our prompt
+  (`event.isTrusted`) or in the popup, the extension's keyboard shortcut, or
+  its right-click menu. Pages can't fake the last two, which are browser UI;
+  with a single matching login the shortcut fills it at once. It runs only in the top
   frame, only on https (or localhost), and only for items whose site matches
   the browser-reported hostname (exact host or subdomain). Lookalike domains
   get nothing.
@@ -366,12 +369,32 @@ the extension interacts with.
   save prompt will offer to save a password the user typed into
   `examp1e.com` under that hostname, and the user can type a real password
   into any page.
-- **Site matching has no public-suffix list.** Single-label suffixes (`com`)
-  never match, but an item saved for `co.uk` would match every `*.co.uk`
-  site.
+- **The public-suffix list is frozen at build time.** Matching uses the
+  Public Suffix List (`tldts`, including private suffixes like `github.io`),
+  so a login saved for `co.uk` or `github.io` matches no page. A suffix added
+  to the list after the extension was built isn't known until a release
+  bumps the dependency. A login set to "anywhere on the site's domain"
+  deliberately matches every subdomain of it, including ones with
+  user-generated content; it's opt-in, and the default stays "this host and
+  its subdomains".
+- **Cards and identities go to any secure page that asks, after a click.**
+  Unlike logins they aren't tied to a site, so domain matching can't protect
+  them: every https page with a checkout or address form gets an offer, and
+  clicking Fill hands that page the card (number, expiry, security code) or
+  the address. A phishing checkout gets the card if the user clicks.
+  What's left: a click every time (never on page load), offers that show
+  labels only ("Visa •••• 4242 · Jane D.", "Home · Jane") until then, top
+  frame only, and https only. Card fields inside a payment provider's iframe
+  (Stripe, Braintree…) aren't filled at all; supporting them would mean
+  deciding which frame's origin gets the card, and is left for later.
 - **Pending "save?" credentials** sit in `chrome.storage.session` for up to 2
   minutes, readable by anything that can read our service worker's
   storage (i.e. only a compromised browser).
+- **Generated passwords** from the right-click menu sit there too, for up to
+  15 minutes per tab (or until saved, the tab closes, or the vault locks), so
+  one isn't lost when a site's form never triggers the save prompt. They're
+  generated in the background and also go to the page they were generated
+  for, which is the point.
 
 ## 6. Network attacker (MITM)
 
@@ -513,6 +536,13 @@ Replaying or rearranging previously valid ciphertexts or credentials.
   ciphertext (up to ten per login), so a compromised vault also exposes
   passwords you may still use elsewhere. Users can clear an item's history
   from its edit form.
+- **Deleted items are kept for 30 days.** "Delete" moves an item to the
+  trash, where it stays encrypted in the vault until it's 30 days old and a
+  web vault loads the vault (the server can't purge it: it can't tell
+  trashed items apart). Until then, someone who gets into the vault also
+  gets those items. "Delete forever" and "Empty trash" remove them at once.
+  The server could refuse a purge, as it can refuse any write; the item then
+  simply stays in the trash.
 - **Two-factor secrets kept with their passwords.** Storing a site's TOTP
   secret next to its password is convenient, but it means whoever gets into
   the vault (a guessed master password, an unlocked device) gets both

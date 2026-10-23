@@ -2,6 +2,7 @@
   "files": [],
   "references": [
     { "path": "packages/crypto" },
+    { "path": "packages/item-format" },
     { "path": "packages/server" },
     { "path": "packages/web" },
     { "path": "packages/extension" }

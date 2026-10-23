@@ -5,6 +5,7 @@
   "description": "VaultX: self-hosted, zero-knowledge password manager",
   "workspaces": [
     "packages/crypto",
+    "packages/item-format",
     "packages/server",
     "packages/web",
     "packages/extension"
@@ -13,7 +14,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "build": "tsc -b packages/crypto packages/server packages/web packages/extension",
+    "build": "tsc -b packages/crypto packages/item-format packages/server packages/web packages/extension",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",

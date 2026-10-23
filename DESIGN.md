@@ -443,6 +443,14 @@ lowercase UUID) before the first save, so it can encrypt with it.
 - `PUT /vault-items/:id {revision, encrypted_data, nonce}` must send exactly
   the stored revision + 1, or gets a 409 with `current_revision`. This also
   stops a client with a stale copy overwriting a newer save.
+- `PUT /vault-items/batch {items: [{id, revision, encrypted_data, nonce}]}`
+  applies the same rules to up to 500 items in one transaction with one
+  manifest change: if any item is stale (409 with its `id` and
+  `current_revision`), missing or another user's (404), or reuses its nonce
+  (409), nothing is saved. `POST /vault-items/batch-delete {ids}` deletes up
+  to 500 items the same way. Both share the import's tighter per-account rate
+  limit. They exist so emptying the trash or changing many items doesn't cost
+  one request (and one manifest version) per item.
 
 The server stores the bytes unchanged and enforces:
 
@@ -655,19 +663,48 @@ see site names, usernames, passwords, notes or search queries.
 Optional fields, each left out of the JSON when unset so older items encrypt
 exactly as before:
 
-| Field      | Contents                                                                              |
-| ---------- | ------------------------------------------------------------------------------------- |
-| `type`     | `note`, `card` or `identity`; absent for a login. `site` is the title for those.      |
-| `totp`     | The site's two-factor setup key or `otpauth://` link, as pasted (logins).             |
-| `tags`     | Free-form labels, deduplicated case-insensitively.                                    |
-| `favorite` | `true` to sort first in the vault.                                                    |
-| `fields`   | Card details (`cardholder`, `number`, `expiry`, `cvv`) or identity details.           |
-| `history`  | Earlier passwords, oldest first, each with when it was replaced; at most 10 (logins). |
+| Field       | Contents                                                                                 |
+| ----------- | ---------------------------------------------------------------------------------------- |
+| `type`      | `note`, `card` or `identity`; absent for a login. `site` is the title for those.         |
+| `totp`      | The site's two-factor setup key or `otpauth://` link, as pasted (logins).                |
+| `tags`      | Free-form labels, deduplicated case-insensitively.                                       |
+| `favorite`  | `true` to sort first in the vault.                                                       |
+| `fields`    | Card details (`cardholder`, `number`, `expiry`, `cvv`) or identity details.              |
+| `history`   | Earlier passwords, oldest first, each with when it was replaced; at most 10 (logins).    |
+| `deletedAt` | When the item was moved to the trash (ISO 8601); absent for live items.                  |
+| `folder`    | The item's folder, levels joined by `/` (`Work/Servers`); absent when in no folder.      |
+| `match`     | How a login matches pages: `domain`, `exact` or `never`; absent for the default, `host`. |
 
-The extension reads and preserves all of them but only offers logins (its
-popup, autofill and save prompt ignore the other kinds). When the extension's
+The extension reads and preserves all of them. It matches and fills logins
+by site, and offers cards and identities on any secure page with a checkout
+or address form: by label only, filling one after a click (they aren't tied
+to a site; see THREAT_MODEL.md §5). Notes are never offered. When the extension's
 save prompt updates a password it records the old one in `history`, like the
 web vault does.
+
+**Folders** exist only through the items in them: `folder` holds a path,
+trimmed per level with empty levels dropped, at most 5 levels of at most 64
+characters (`normalizeFolder`; a stored value outside those limits fails
+that item's decryption, like any malformed field). There's no separate folder
+object to sync, so an empty folder simply disappears, and paths compare
+without case. Renaming or deleting a folder (its items move up a level, never
+deleted) and moving several items are one `PUT /vault-items/batch` per 500
+items, trashed items included, so a restored item returns to the renamed
+folder. Folder names stay inside the ciphertext: the web vault keeps which
+folders are collapsed in memory only, never in `localStorage` or a URL.
+Bitwarden's `folder` column is imported; the extension ignores folders.
+
+**The trash** is client-side only, since the server can't read items.
+"Delete" saves the next revision with `deletedAt` set, an ordinary write, so
+the manifest and revision ledger treat it like any edit, and a server hiding
+a trashed item is caught as "missing". Trashed items are left out of the
+vault list, search, tags, the health report, the breach check, the import
+duplicate check and (by default) backups, and the extension never lists,
+matches or fills them. Restoring saves a revision without `deletedAt`. When
+the web vault loads a vault it trusts (not while a baseline is pending), it
+deletes items trashed 30 or more days ago with one batch delete; if that
+fails, they stay in the trash and it tries again next load. A vault nobody
+opens is never purged.
 
 `totp` is the site's two-factor setup key (base32) or `otpauth://` link, as
 the user pasted it. It's left out of the JSON when empty, so items
@@ -678,10 +715,35 @@ background worker: the popup and content script only ever receive a code
 and its remaining seconds, under the same rules as passwords (matching
 host, https only, after a trusted click).
 
-`v` versions the format. The web vault and the extension share it, and a test
-in the extension package checks the two stay compatible. `site` may be a bare
-domain or a URL. The extension matches it by hostname: exact host or
-subdomain, ignoring `www.`.
+`v` versions the format. It's implemented once, in
+`packages/item-format`, which the web vault and the extension both import
+(a test in the extension package checks they use that one implementation and
+can read each other's ciphertexts). `site` may be a bare domain or a URL. The
+extension matches it by hostname, ignoring `www.`, per the login's `match`:
+`host` (default; that host or a subdomain), `domain` (anywhere on its
+registrable domain, from the Public Suffix List with private suffixes), `exact`
+(that host only) or `never` (listed in the popup, never offered or filled on a
+page; the save prompt still treats it as saved, so it offers an update, not a
+duplicate). A site that is itself a public suffix (`co.uk`, `github.io`)
+matches no page in any mode, and the web vault's item form warns about it.
+Matching lives in the extension's background only (`background/matching.ts`):
+the suffix list is about 130 KB, far too big for the content script.
+
+**Fields from newer versions are kept.** The web vault and the extension
+update separately, so an older client will meet items written by a newer
+one. Any key `parseItem` doesn't know goes into an in-memory `extra` object,
+and `serializeItem` writes it back after the known fields, so editing an
+item, changing its password from the extension's save prompt, or restoring
+it from a backup never drops a field another client added. `extra` can't
+replace a known field: known keys are filtered out of it before writing.
+Nothing in `extra` is shown, searched or validated; it's only carried. Rules
+for adding a field:
+
+- Optional, and left out of the JSON when empty or default, so items that
+  don't use it encrypt exactly as before (keep `v: 1`).
+- Add its key to `KNOWN_KEYS` in `packages/item-format/src/index.ts` and
+  validate it in `parseItem`, so a malformed value fails decryption of that
+  item instead of being shown.
 
 ### Where clients keep secrets
 

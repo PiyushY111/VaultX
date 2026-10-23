@@ -34,22 +34,39 @@ vault, stay on your devices:
   VaultX account.
 - **A password health report** flags weak, reused and old passwords,
   checked entirely on your device.
+- **A passphrase generator** (words from EFF's large list) alongside random
+  passwords, and a suggested passphrase for your master password at signup.
+- **Smarter site matching:** the extension uses the Public Suffix List, so a
+  login saved for `co.uk` or `github.io` never fills elsewhere, and each
+  login can fill on its host (default), its whole domain, its exact address
+  only, or nowhere.
 - **Two-factor codes for sites:** save a site's setup key with its login and
   the vault shows the live 6-digit code; the extension can fill it on the
   site's 2FA page.
-- **Secure notes, cards and identities** alongside logins, with **tags and
-  favorites**, and a **password history** kept inside each login.
+- **Keyboard shortcut and right-click menu** in the extension: Ctrl/⌘+Shift+L
+  fills the login for the page; right-click a field to fill a login, code,
+  card or address, or to generate a password (kept in the popup for 15
+  minutes, so it's never lost).
+- **Card and address autofill:** the extension offers saved cards and
+  identities on checkout and address forms, and fills one after a click
+  (not inside payment providers' iframes).
+- **Secure notes, cards and identities** alongside logins, with **tags,
+  favorites and folders** (nested, renamed or emptied in one save), and a
+  **password history** kept inside each login.
+- **A trash with Undo:** deleted items can be restored for 30 days, then
+  are deleted for good the next time you open the vault.
 - **Opt-in breach check** against Have I Been Pwned, sending only hash
   prefixes.
 - **The server stores opaque blobs.** Integration tests scan every raw
   database row to confirm no plaintext or key material is ever stored.
 
-| Package                                    | What it is                                                                                                                                                 |
-| ------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`packages/crypto`](packages/crypto)       | All cryptography (libsodium): Argon2id, HKDF, XChaCha20-Poly1305. Known-answer tests against independent implementations.                                  |
-| [`packages/server`](packages/server)       | Fastify + Postgres API. Stores ciphertext, verifies auth hashes in constant time, throttles logins per IP and per account.                                 |
-| [`packages/web`](packages/web)             | React + Vite web vault: signup, login, searchable vault, item editor, password generator, strength meter, auto-lock, master password change, session list. |
-| [`packages/extension`](packages/extension) | Manifest V3 Chrome extension: popup vault, click-to-autofill, "save this password?" prompts, clipboard clearing.                                           |
+| Package                                        | What it is                                                                                                                                                                       |
+| ---------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`packages/crypto`](packages/crypto)           | All cryptography (libsodium): Argon2id, HKDF, XChaCha20-Poly1305. Known-answer tests against independent implementations.                                                        |
+| [`packages/item-format`](packages/item-format) | The item format (the JSON inside each encrypted item), shared by the web vault and the extension. Keeps fields it doesn't know, so older clients never drop what newer ones add. |
+| [`packages/server`](packages/server)           | Fastify + Postgres API. Stores ciphertext, verifies auth hashes in constant time, throttles logins per IP and per account.                                                       |
+| [`packages/web`](packages/web)                 | React + Vite web vault: signup, login, searchable vault, item editor, password generator, strength meter, auto-lock, master password change, session list.                       |
+| [`packages/extension`](packages/extension)     | Manifest V3 Chrome extension: popup vault, click-to-autofill, "save this password?" prompts, clipboard clearing.                                                                 |
 
 - **How it works:** [DESIGN.md](DESIGN.md) (key hierarchy, protocols, data model).
 - **What it protects against, and what it doesn't:** [THREAT_MODEL.md](THREAT_MODEL.md).
