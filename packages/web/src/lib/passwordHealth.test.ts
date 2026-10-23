@@ -18,6 +18,19 @@ const item = (site: string, password: string, createdAt = '2026-09-01T00:00:00Z'
 });
 
 describe('checkPasswordHealth', () => {
+  it('ignores items in the trash, even as reuse', async () => {
+    const trashed = { ...item('old.example.com', STRONG), deletedAt: '2026-09-27T00:00:00Z' };
+    const weakTrashed = {
+      ...item('weak.example.com', 'password1'),
+      deletedAt: '2026-09-27T00:00:00Z',
+    };
+    const report = await checkPasswordHealth(
+      [item('a.example.com', STRONG), trashed, weakTrashed],
+      NOW,
+    );
+    expect(report).toMatchObject({ checked: 1, weak: 0, reused: 0, issues: [] });
+  });
+
   it('is clean for strong, unique, recently saved passwords', async () => {
     const report = await checkPasswordHealth(
       [item('a.example.com', STRONG), item('b.example.com', `${STRONG}-b`)],

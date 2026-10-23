@@ -1,4 +1,4 @@
-import { isLogin, passwordChangedAt, type VaultItem } from '../vault/items';
+import { isLogin, isTrashed, passwordChangedAt, type VaultItem } from '../vault/items';
 import { MIN_MASTER_PASSWORD_SCORE, estimateStrength, type Strength } from './passwordStrength';
 
 /**
@@ -41,7 +41,8 @@ export async function checkPasswordHealth(
   now = new Date(),
   breaches?: ReadonlyMap<string, number>,
 ): Promise<HealthReport> {
-  const logins = items.filter((item) => isLogin(item) && item.password);
+  // Items in the trash are on their way out: they don't count, even as reuse.
+  const logins = items.filter((item) => isLogin(item) && !isTrashed(item) && item.password);
 
   const uses = new Map<string, number>();
   for (const item of logins) uses.set(item.password, (uses.get(item.password) ?? 0) + 1);

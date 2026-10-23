@@ -63,3 +63,68 @@ export function generatePassword(options: GeneratorOptions): string {
 export function entropyBits(options: GeneratorOptions): number {
   return Math.floor(options.length * Math.log2(characterClasses(options).join('').length));
 }
+
+export const MIN_PASSPHRASE_WORDS = 4;
+export const MAX_PASSPHRASE_WORDS = 12;
+export const PASSPHRASE_SEPARATORS = ['-', '.', '_', ' '] as const;
+export type PassphraseSeparator = (typeof PASSPHRASE_SEPARATORS)[number];
+
+export interface PassphraseOptions {
+  words: number;
+  separator: PassphraseSeparator;
+  /** Capitalize one randomly chosen word. */
+  capitalize: boolean;
+  /** Append one random digit to one randomly chosen word. */
+  includeNumber: boolean;
+}
+
+/** Six EFF words plus a capital and a digit: about 86 bits. */
+export const DEFAULT_PASSPHRASE_OPTIONS: PassphraseOptions = {
+  words: 6,
+  separator: '-',
+  capitalize: true,
+  includeNumber: true,
+};
+
+/**
+ * Generates a passphrase of words drawn uniformly (with repetition) from
+ * `wordlist`. The list is a parameter so callers can load it lazily (see
+ * lib/wordlist); its words must not contain any of the separators.
+ */
+export function generatePassphrase(
+  options: PassphraseOptions,
+  wordlist: readonly string[],
+): string {
+  const { words, separator, capitalize, includeNumber } = options;
+  if (!Number.isInteger(words) || words < MIN_PASSPHRASE_WORDS || words > MAX_PASSPHRASE_WORDS) {
+    throw new RangeError(
+      `words must be an integer from ${MIN_PASSPHRASE_WORDS} to ${MAX_PASSPHRASE_WORDS}`,
+    );
+  }
+  if (!PASSPHRASE_SEPARATORS.includes(separator)) throw new RangeError('Unknown separator');
+  if (wordlist.length < 2) throw new RangeError('The word list needs at least two words');
+
+  const picked = Array.from({ length: words }, () => wordlist[randomInt(wordlist.length)]!);
+  const capitalized = capitalize ? randomInt(words) : -1;
+  const numbered = includeNumber ? randomInt(words) : -1;
+  return picked
+    .map((word, index) => {
+      const cased = index === capitalized ? word[0]!.toUpperCase() + word.slice(1) : word;
+      return index === numbered ? `${cased}${randomInt(10)}` : cased;
+    })
+    .join(separator);
+}
+
+/**
+ * Strength in bits: the words, plus which word is capitalized, plus the digit
+ * and which word it's on. The separator is the user's choice, so it adds
+ * nothing.
+ */
+export function passphraseEntropyBits(options: PassphraseOptions, wordlistSize: number): number {
+  const { words, capitalize, includeNumber } = options;
+  return Math.floor(
+    words * Math.log2(wordlistSize) +
+      (capitalize ? Math.log2(words) : 0) +
+      (includeNumber ? Math.log2(10) + Math.log2(words) : 0),
+  );
+}
