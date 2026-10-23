@@ -1,0 +1,23 @@
+{
+  "name": "@password-manager/item-format",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The vault item format (the JSON inside each encrypted item), shared by the web vault and the extension",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "clean": "rm -rf dist *.tsbuildinfo"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.11"
+  },
+  "files": [
+    "dist"
+  ],
+  "license": "MIT"
+}
