@@ -31,6 +31,26 @@ export interface PopupItem extends ItemSummary {
   hasTotp: boolean;
 }
 
+export type FormKind = 'card' | 'identity';
+
+/**
+ * A card or identity as offered on a page or listed in the popup: a label
+ * ("Visa •••• 4242 · Jane D.", "Home · Jane"), never its number, expiry,
+ * security code or address.
+ */
+export interface FormItemSummary {
+  id: string;
+  label: string;
+}
+
+/** A card's or identity's fields, released for one page after a click. */
+export interface FormFill {
+  kind: FormKind;
+  /** The page's host when released, so the content script can re-check it. */
+  host: string;
+  values: Record<string, string>;
+}
+
 /** A two-factor code, never the secret it comes from. */
 export interface TotpCodeResponse {
   code: string;
@@ -90,7 +110,15 @@ export type PopupRequest =
   /** The user accepted it, in the popup. Content scripts can never send this. */
   | { type: 'acceptBaseline' }
   | { type: 'getCheckpoint' }
-  | { type: 'verifyCheckpoint'; checkpoint: string };
+  | { type: 'verifyCheckpoint'; checkpoint: string }
+  /** Cards and identities, as labels. */
+  | { type: 'listFormItems' }
+  /** One card's or identity's fields, to copy from the popup. */
+  | { type: 'getFormItemFields'; itemId: string }
+  /** Fills a card or identity into the active tab's form. */
+  | { type: 'fillTabWithForm'; tabId: number; itemId: string }
+  /** The password last generated for a tab from the right-click menu, if still kept. */
+  | { type: 'getGenerated'; tabId: number };
 
 /** Requests only a content script (top frame of an http(s) tab) may make. */
 export type ContentRequest =
@@ -102,7 +130,11 @@ export type ContentRequest =
   /** Logins for this page that have a two-factor secret (usernames only). */
   | { type: 'getTotpMatches' }
   /** The current code for one of them; only after a click on our prompt. */
-  | { type: 'fillTotp'; itemId: string };
+  | { type: 'fillTotp'; itemId: string }
+  /** Cards or identities to offer on a checkout or address form (labels only). */
+  | { type: 'getFormItems'; kind: FormKind }
+  /** One of them, to fill; only after a click on our prompt. */
+  | { type: 'fillFormItem'; kind: FormKind; itemId: string };
 
 /** Sent by the background to a tab's content script. */
 export interface FillCredentialMessage {
@@ -110,6 +142,38 @@ export interface FillCredentialMessage {
   username: string;
   password: string;
 }
+
+/** A password generated from the right-click menu, kept so it can't be lost before it's saved. */
+export interface GeneratedPassword {
+  host: string;
+  password: string;
+  /** Epoch milliseconds. */
+  createdAt: number;
+}
+
+/** What a keyboard shortcut or menu entry asks a page to offer, in our prompt. */
+export type ChooserKind = 'login' | 'totp' | FormKind;
+
+/** Sent by the background to a tab's content script, from the popup's "Fill in this tab". */
+export interface FillFormMessage extends FormFill {
+  type: 'fillForm';
+}
+
+/**
+ * Everything the background sends a tab's content script (top frame only).
+ * Anything carrying a value names the page `host` it was released for, and
+ * the content script re-checks it before using the value.
+ */
+export type BackgroundToContent =
+  | (FillCredentialMessage & { host: string })
+  | FillFormMessage
+  | VaultUnlockedMessage
+  /** The user asked (shortcut or menu) and there are several items: show our chooser. */
+  | { type: 'showChooser'; kind: ChooserKind }
+  | { type: 'showNotice'; message: string; detail?: string }
+  /** A generated password, for the right-clicked field (and its confirmation field). */
+  | { type: 'fillGenerated'; password: string; host: string }
+  | { type: 'fillTotpCode'; code: string; host: string };
 
 /** Sent by the background to its offscreen document. */
 export interface ClearClipboardMessage {
@@ -167,6 +231,10 @@ export const POPUP_REQUEST_TYPES = new Set<PopupRequest['type']>([
   'acceptBaseline',
   'getCheckpoint',
   'verifyCheckpoint',
+  'listFormItems',
+  'getFormItemFields',
+  'fillTabWithForm',
+  'getGenerated',
 ]);
 
 export const CONTENT_REQUEST_TYPES = new Set<ContentRequest['type']>([
@@ -177,4 +245,6 @@ export const CONTENT_REQUEST_TYPES = new Set<ContentRequest['type']>([
   'resolvePendingSave',
   'getTotpMatches',
   'fillTotp',
+  'getFormItems',
+  'fillFormItem',
 ]);

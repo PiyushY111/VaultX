@@ -31,9 +31,24 @@
       "all_frames": false
     }
   ],
-  "permissions": ["storage", "alarms", "idle", "offscreen", "clipboardWrite"],
+  "permissions": ["storage", "alarms", "idle", "offscreen", "clipboardWrite", "contextMenus"],
   "host_permissions": ["https://*/*", "http://localhost/*", "http://127.0.0.1/*"],
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'none'; base-uri 'none'"
+  },
+  "commands": {
+    "fill-login": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+L",
+        "mac": "Command+Shift+L"
+      },
+      "description": "Fill the saved login for this page"
+    },
+    "_execute_action": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+Y",
+        "mac": "Command+Shift+Y"
+      }
+    }
   }
 }

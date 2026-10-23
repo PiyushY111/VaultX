@@ -1,11 +1,19 @@
-import type { FillCredentialMessage } from '../shared/messages';
+// The same generator as the web vault and the popup (one implementation to review).
+import {
+  DEFAULT_GENERATOR_OPTIONS,
+  generatePassword,
+} from '../../../web/src/lib/passwordGenerator';
+import type { BackgroundToContent, FillCredentialMessage } from '../shared/messages';
 import { clipboardClearer } from './clipboard';
+import { MENU_ITEMS, handleFillCommand, handleMenuClick, type CommandDeps } from './commands';
 import { classifySender, handleMessage, type RouterDeps } from './router';
 import { loadSettings } from './settings';
 import { chromeStore } from './storage';
 import { Vault } from './vault';
 
 const AUTO_LOCK_ALARM = 'auto-lock';
+/** Where the content script runs, and so where filling (and the menu) can work. */
+const PAGES = ['https://*/*', 'http://localhost/*', 'http://127.0.0.1/*'];
 
 const sessionStore = chromeStore(chrome.storage.session);
 const settingsStore = chromeStore(chrome.storage.local);
@@ -36,10 +44,12 @@ const deps: RouterDeps = {
       // still matches `host`, in case the tab navigated in between.
       await chrome.tabs.sendMessage(tabId, message, { frameId: 0 });
     },
+    async sendFillForm(tabId, message) {
+      // Top frame only; the content script re-checks `host`, like sendFill.
+      await chrome.tabs.sendMessage(tabId, message, { frameId: 0 });
+    },
     async notifyUnlocked() {
-      const tabs = await chrome.tabs.query({
-        url: ['https://*/*', 'http://localhost/*', 'http://127.0.0.1/*'],
-      });
+      const tabs = await chrome.tabs.query({ url: PAGES });
       await Promise.all(
         tabs.map((tab) =>
           tab.id === undefined
@@ -82,4 +92,53 @@ chrome.runtime.onStartup.addListener(() => {
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   void vault.forgetTab(tabId);
+});
+
+// --- Keyboard shortcut and right-click menu (see commands.ts) ---------------
+
+const sendToTab = async (tabId: number, message: BackgroundToContent) => {
+  // Top frame only. A tab opened before the extension was installed has no
+  // content script yet; there's nothing to tell it.
+  await chrome.tabs.sendMessage(tabId, message, { frameId: 0 }).catch(() => undefined);
+};
+
+const commandDeps: CommandDeps = {
+  vault,
+  send: sendToTab,
+  generatePassword: () => generatePassword(DEFAULT_GENERATOR_OPTIONS),
+  // chrome.action.openPopup exists from Chrome 127; the manifest allows 120.
+  ...(typeof chrome.action?.openPopup === 'function' && {
+    openPopup: () => chrome.action.openPopup(),
+  }),
+};
+
+/** A failure (e.g. the login went away meanwhile) is shown on the page, not dropped. */
+function reportOn(tabId: number | undefined) {
+  return (error: unknown) => {
+    if (tabId === undefined) return;
+    const message = error instanceof Error ? error.message : 'Something went wrong';
+    void sendToTab(tabId, { type: 'showNotice', message: 'Could not fill', detail: message });
+  };
+}
+
+chrome.commands.onCommand.addListener((command, tab) => {
+  if (command === 'fill-login' && tab)
+    void handleFillCommand(tab, commandDeps).catch(reportOn(tab.id));
+});
+
+// Menus persist across browser restarts; created once per install or update.
+chrome.runtime.onInstalled.addListener(() => {
+  chrome.contextMenus.removeAll(() => {
+    const where = { contexts: ['editable'] as ['editable'], documentUrlPatterns: PAGES };
+    chrome.contextMenus.create({ id: 'vaultx', title: 'VaultX', ...where });
+    for (const item of MENU_ITEMS) {
+      chrome.contextMenus.create({ id: item.id, parentId: 'vaultx', title: item.title, ...where });
+    }
+  });
+});
+
+chrome.contextMenus.onClicked.addListener((info, tab) => {
+  void handleMenuClick(String(info.menuItemId), info.frameId, tab ?? {}, commandDeps).catch(
+    reportOn(tab?.id),
+  );
 });

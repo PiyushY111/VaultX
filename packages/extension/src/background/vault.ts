@@ -19,6 +19,10 @@ import {
 import { fromBase64, toBase64 } from '../shared/base64';
 import type {
   CheckpointVerification,
+  FormFill,
+  GeneratedPassword,
+  FormItemSummary,
+  FormKind,
   ItemSummary,
   PendingBaselineInfo,
   PendingSavePrompt,
@@ -27,7 +31,8 @@ import type {
   TotpCodeResponse,
   VaultWarnings,
 } from '../shared/messages';
-import { securePageHost, siteMatchesHost } from '../shared/urls';
+import { securePageHost } from '../shared/urls';
+import { itemMatchesHost, itemMatchesHostForSave } from './matching';
 import {
   ApiError,
   createApi,
@@ -42,6 +47,7 @@ import {
   decryptVaultItems,
   encryptVaultItem,
   isLogin,
+  isTrashed,
   withPasswordHistory,
   type VaultItem,
   type VaultItemData,
@@ -160,11 +166,37 @@ export interface VaultDeps {
 const SESSION_KEY = 'session';
 const ACTIVITY_KEY = 'lastActivity';
 const pendingKey = (tabId: number) => `pending:${tabId}`;
+const generatedKey = (tabId: number) => `generated:${tabId}`;
+
+/** How long a password generated from the right-click menu is kept for the popup. */
+export const GENERATED_TTL_MS = 15 * 60_000;
 
 /** How long a captured "save this password?" offer survives (e.g. across the post-login redirect). */
 export const PENDING_SAVE_TTL_MS = 2 * 60_000;
 
 const wipe = (...buffers: Uint8Array[]) => buffers.forEach((buffer) => buffer.fill(0));
+
+/** "Jane Q Doe" → "Jane D." */
+function shortName(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length < 2) return parts[0] ?? '';
+  return `${parts[0]} ${parts.at(-1)![0]}.`;
+}
+
+/**
+ * "Visa •••• 4242 · Jane D." for a card, "Home · Jane" for an identity: enough
+ * to tell them apart, nothing more (no full number, expiry, code or address).
+ */
+function summarizeFormItem(item: VaultItem): FormItemSummary {
+  const fields = item.fields ?? {};
+  if (item.type === 'card') {
+    const digits = (fields.number ?? '').replace(/\D/g, '');
+    const last4 = digits.length > 4 ? ` •••• ${digits.slice(-4)}` : '';
+    const holder = shortName(fields.cardholder ?? '');
+    return { id: item.id, label: [`${item.site}${last4}`, holder].filter(Boolean).join(' · ') };
+  }
+  return { id: item.id, label: [item.site, fields.firstName].filter(Boolean).join(' · ') };
+}
 
 export class Vault {
   private active: ActiveSession | null = null;
@@ -503,9 +535,63 @@ export class Vault {
     return this.warnings;
   }
 
-  /** The vault's logins. Notes, cards and identities live in the web vault only. */
+  /**
+   * The vault's logins, without the trash. Everything that lists, matches,
+   * fills or recognizes a login goes through here. Notes and the trash live
+   * in the web vault only; cards and identities go through getFormItems.
+   */
   private async getLogins(): Promise<VaultItem[]> {
-    return (await this.getItems()).filter(isLogin);
+    return (await this.getItems()).filter((item) => isLogin(item) && !isTrashed(item));
+  }
+
+  /** Cards or identities, without the trash. Not tied to a site, unlike logins. */
+  private async getFormItems(kind: FormKind): Promise<VaultItem[]> {
+    return (await this.getItems())
+      .filter((item) => item.type === kind && !isTrashed(item))
+      .sort((a, b) => a.site.localeCompare(b.site, undefined, { sensitivity: 'base' }));
+  }
+
+  /**
+   * Cards or identities to offer on a page: labels only. Any secure page can
+   * ask (they aren't tied to a site), so nothing here may be worth stealing.
+   */
+  async formItemSummaries(kind: FormKind, pageUrl: string): Promise<FormItemSummary[]> {
+    if (!securePageHost(pageUrl)) return [];
+    return (await this.getFormItems(kind)).map(summarizeFormItem);
+  }
+
+  async formItemsForPopup(): Promise<{
+    cards: FormItemSummary[];
+    identities: FormItemSummary[];
+  }> {
+    return {
+      cards: (await this.getFormItems('card')).map(summarizeFormItem),
+      identities: (await this.getFormItems('identity')).map(summarizeFormItem),
+    };
+  }
+
+  /** A card's or identity's fields, for the popup (a trusted extension page) to copy. */
+  async formFieldsForPopup(itemId: string): Promise<Record<string, string>> {
+    const items = [...(await this.getFormItems('card')), ...(await this.getFormItems('identity'))];
+    const item = items.find((candidate) => candidate.id === itemId);
+    if (!item) throw new Error('That card or identity is no longer in your vault');
+    return { ...item.fields };
+  }
+
+  /**
+   * Releases one card or identity for the (browser-reported) page URL: only
+   * after a click on our prompt or in the popup, and only on a secure page.
+   * With `kind`, the item must be of that kind.
+   */
+  async formFillFor(itemId: string, pageUrl: string, kind?: FormKind): Promise<FormFill> {
+    const host = securePageHost(pageUrl);
+    if (!host) throw new Error('Autofill is only available on https pages');
+    const kinds: FormKind[] = kind ? [kind] : ['card', 'identity'];
+    for (const candidate of kinds) {
+      const item = (await this.getFormItems(candidate)).find((it) => it.id === itemId);
+      if (item) return { kind: candidate, host, values: { ...item.fields } };
+    }
+    throw new Error('That card or identity is no longer in your vault');
   }
 
   async listForPopup(): Promise<PopupItem[]> {
@@ -537,7 +623,7 @@ export class Vault {
     const host = securePageHost(pageUrl);
     if (!host) return [];
     return (await this.getLogins())
-      .filter((item) => item.totp && siteMatchesHost(item.site, host))
+      .filter((item) => item.totp && itemMatchesHost(item, host))
       .map(({ id, site, username }) => ({ id, site, username }));
   }
 
@@ -546,8 +632,7 @@ export class Vault {
     const host = securePageHost(pageUrl);
     if (!host) throw new Error('Autofill is only available on https pages');
     const item = (await this.getLogins()).find((candidate) => candidate.id === itemId);
-    if (!item || !siteMatchesHost(item.site, host))
-      throw new Error('No matching login for this site');
+    if (!item || !itemMatchesHost(item, host)) throw new Error('No matching login for this site');
     return this.totpCodeOf(item);
   }
 
@@ -557,7 +642,7 @@ export class Vault {
     if (!host) return [];
     const items = await this.getLogins();
     return items
-      .filter((item) => siteMatchesHost(item.site, host))
+      .filter((item) => itemMatchesHost(item, host))
       .map(({ id, site, username }) => ({ id, site, username }));
   }
 
@@ -569,8 +654,7 @@ export class Vault {
     const host = securePageHost(pageUrl);
     if (!host) throw new Error('Autofill is only available on https pages');
     const item = (await this.getLogins()).find((candidate) => candidate.id === itemId);
-    if (!item || !siteMatchesHost(item.site, host))
-      throw new Error('No matching login for this site');
+    if (!item || !itemMatchesHost(item, host)) throw new Error('No matching login for this site');
     return { username: item.username, password: item.password, host };
   }
 
@@ -587,7 +671,7 @@ export class Vault {
     const host = securePageHost(pageUrl);
     if (!host || !password || !(await this.isUnlocked())) return;
     const existing = (await this.getLogins()).find(
-      (item) => siteMatchesHost(item.site, host) && item.username === username,
+      (item) => itemMatchesHostForSave(item, host) && item.username === username,
     );
     if (existing?.password === password) {
       await this.deps.session.remove(pendingKey(tabId));
@@ -631,6 +715,8 @@ export class Vault {
     }
     await this.deps.session.remove(pendingKey(tabId));
     if (!pending || !save) return;
+    // Saved now, so there's no need to keep it any more.
+    await this.deps.session.remove(generatedKey(tabId));
 
     if (pending.itemId) {
       const itemId = pending.itemId;
@@ -719,5 +805,28 @@ export class Vault {
 
   async forgetTab(tabId: number): Promise<void> {
     await this.deps.session.remove(pendingKey(tabId));
+    await this.deps.session.remove(generatedKey(tabId));
+  }
+
+  /**
+   * Keeps a password generated from the right-click menu for the popup to
+   * show, so it isn't lost if the site's form never triggers the save
+   * prompt. Memory-only session storage (cleared on lock), even while locked:
+   * generating needs no keys.
+   */
+  async rememberGenerated(tabId: number, host: string, password: string): Promise<void> {
+    const record: GeneratedPassword = { host, password, createdAt: this.deps.now() };
+    await this.deps.session.set(generatedKey(tabId), record);
+  }
+
+  /** The password last generated for the tab, while it's kept. */
+  async generatedFor(tabId: number): Promise<GeneratedPassword | null> {
+    const record = await this.deps.session.get<GeneratedPassword>(generatedKey(tabId));
+    if (!record) return null;
+    if (this.deps.now() - record.createdAt >= GENERATED_TTL_MS) {
+      await this.deps.session.remove(generatedKey(tabId));
+      return null;
+    }
+    return record;
   }
 }

@@ -5,17 +5,20 @@
   "description": "Browser extension client",
   "type": "module",
   "scripts": {
-    "build:crypto": "tsc -b ../crypto",
-    "prebuild": "npm run build:crypto",
+    "build:deps": "tsc -b ../crypto ../item-format",
+    "prebuild": "npm run build:deps",
     "build": "node build.mjs",
-    "typecheck": "npm run build:crypto && tsc -p tsconfig.json",
-    "pretest": "npm run build:crypto",
+    "typecheck": "npm run build:deps && tsc -p tsconfig.json",
+    "pretest": "npm run build:deps",
     "test": "vitest run",
     "test:e2e": "npm run build && playwright test",
     "clean": "rm -rf dist test-results playwright-report"
   },
   "dependencies": {
-    "@password-manager/crypto": "0.1.0"
+    "@password-manager/crypto": "0.1.0",
+    "@password-manager/item-format": "0.1.0",
+    "tldts": "7.4.18",
+    "tldts-core": "7.4.18"
   },
   "devDependencies": {
     "@playwright/test": "^1.63.0",

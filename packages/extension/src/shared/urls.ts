@@ -1,11 +1,9 @@
 /**
- * URL and domain rules shared by the background and content scripts.
- *
- * Matching is by hostname: a saved item for `example.com` matches
- * `example.com`, `www.example.com` and `login.example.com`, but not
- * `example.com.evil.net` or `notexample.com`. There is no public-suffix list,
- * so single-label hosts (`com`) are never treated as matchable, but a saved
- * site like `co.uk` would match every `*.co.uk` host — don't save those.
+ * URL and host rules shared by the background and content scripts: whether a
+ * page is secure enough for autofill, and the normalized host of a page or a
+ * saved site. Which logins match a page is decided in the background only
+ * (background/matching.ts, with the Public Suffix List), so nothing here may
+ * grow big enough to bloat the content script.
  */
 
 const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
@@ -46,13 +44,6 @@ export function securePageHost(pageUrl: string): string | null {
   } catch {
     return null;
   }
-}
-
-/** Does a saved site match the page host (same host or a subdomain of it)? */
-export function siteMatchesHost(site: string, pageHost: string): boolean {
-  const saved = siteHost(site);
-  if (!saved) return false;
-  return pageHost === saved || pageHost.endsWith(`.${saved}`);
 }
 
 /** Validates and normalizes a server URL (origin + optional path, no trailing slash). */

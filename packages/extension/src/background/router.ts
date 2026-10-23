@@ -3,6 +3,8 @@ import {
   POPUP_REQUEST_TYPES,
   type ContentRequest,
   type FillCredentialMessage,
+  type FillFormMessage,
+  type FormKind,
   type NewItem,
   type PopupRequest,
   type Response,
@@ -59,12 +61,20 @@ export interface RouterDeps {
   tabs: {
     getUrl(tabId: number): Promise<string | undefined>;
     sendFill(tabId: number, message: FillCredentialMessage & { host: string }): Promise<void>;
+    /** A card or identity, from the popup's "Fill in this tab". */
+    sendFillForm(tabId: number, message: FillFormMessage): Promise<void>;
     /** Lets open tabs that showed "locked" re-offer autofill. */
     notifyUnlocked(): Promise<void>;
   };
 }
 
 const ok = <T>(data: T): Response<T> => ({ ok: true, data });
+
+/** The `kind` a content script asked for, checked: it comes from an untrusted page context. */
+function formKind(kind: unknown): FormKind {
+  if (kind === 'card' || kind === 'identity') return kind;
+  throw new Error('Unknown kind of item');
+}
 
 function isRequest(message: unknown): message is { type: string } {
   return (
@@ -180,6 +190,19 @@ async function handlePopup(request: PopupRequest, deps: RouterDeps): Promise<Res
     case 'scheduleClipboardClear':
       await deps.clipboard.scheduleClear();
       return ok(null);
+    case 'listFormItems':
+      return ok(await vault.formItemsForPopup());
+    case 'getGenerated':
+      return ok(await vault.generatedFor(Number(request.tabId)));
+    case 'getFormItemFields':
+      return ok(await vault.formFieldsForPopup(String(request.itemId)));
+    case 'fillTabWithForm': {
+      const url = await tabs.getUrl(request.tabId);
+      if (!url) throw new Error('Cannot fill this tab');
+      const fill = await vault.formFillFor(String(request.itemId), url);
+      await tabs.sendFillForm(request.tabId, { type: 'fillForm', ...fill });
+      return ok(null);
+    }
     case 'saveSettings': {
       const previous = await loadSettings(settingsStore);
       const settings = await saveSettings(settingsStore, request.settings);
@@ -226,5 +249,14 @@ async function handleContent(
       await vault.touch();
       await vault.resolvePendingSave(sender.tabId, request.save === true);
       return ok(null);
+    case 'getFormItems':
+      if (!(await vault.isUnlocked())) return { ok: false, error: 'Vault is locked', locked: true };
+      return ok(await vault.formItemSummaries(formKind(request.kind), sender.url));
+    case 'fillFormItem':
+      // Only reached from a trusted click on our in-page prompt; counts as activity.
+      await vault.touch();
+      return ok(
+        await vault.formFillFor(String(request.itemId), sender.url, formKind(request.kind)),
+      );
   }
 }
