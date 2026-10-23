@@ -1,5 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { installFakeServer, type FakeServer } from '../../test/fakeServer';
+import { TRASH_RETENTION_DAYS, withPasswordHistory } from './items';
 import { createRevisionLedger } from './revisionLedger';
 import { signUp, type VaultSession } from './session';
 import { compareCheckpoints, vaultCheckpoint } from '@password-manager/crypto';
@@ -276,5 +277,170 @@ describe('vault checkpoint across devices', () => {
     const theirs = await checkpointOf(other);
     expect(theirs.version).toBe(mine.version);
     expect(await compareCheckpoints(theirs, mine)).toBe('mismatch');
+  });
+});
+
+describe('fields from newer versions', () => {
+  it('survive an edit, a favorite toggle and a password change made by this version', async () => {
+    // Written by a newer client that knows a field this version doesn't.
+    const newer = thisDevice();
+    await newer.load();
+    await newer.create({ ...item('a.example.com'), extra: { futureLabel: 'Work/Servers' } });
+
+    const sync = thisDevice();
+    let [loaded] = (await sync.load()).items;
+    expect(loaded!.extra).toEqual({ futureLabel: 'Work/Servers' });
+
+    loaded = await sync.update(loaded!, { ...loaded!, notes: 'edited' });
+    loaded = await sync.update(loaded, { ...loaded, favorite: true });
+    await sync.update(loaded, withPasswordHistory(loaded, { ...loaded, password: 'rotated' }));
+
+    const [reloaded] = (await freshDevice().load()).items;
+    expect(reloaded).toMatchObject({
+      notes: 'edited',
+      favorite: true,
+      password: 'rotated',
+      extra: { futureLabel: 'Work/Servers' },
+    });
+  });
+});
+
+describe('the trash', () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  const T0 = new Date('2026-10-01T00:00:00.000Z');
+  const deviceAt = (now: Date) => new VaultSync(session, createRevisionLedger(EMAIL), () => now);
+  const calls = (method: string, path: string) =>
+    server.requests.filter((r) => r.method === method && r.url.endsWith(path)).length;
+
+  it('moves an item to the trash and back as ordinary new revisions', async () => {
+    const sync = deviceAt(T0);
+    await sync.load();
+    const a = await sync.create(item('a.example.com'));
+
+    const trashed = await sync.trash(a);
+    expect(trashed).toMatchObject({ revision: 2, deletedAt: T0.toISOString() });
+    expect((await thisDevice().load()).items[0]).toMatchObject({ deletedAt: T0.toISOString() });
+
+    const restored = await sync.restore(trashed);
+    expect(restored.revision).toBe(3);
+    expect(restored).not.toHaveProperty('deletedAt');
+    const [reloaded] = (await freshDevice().load()).items;
+    expect(reloaded).toMatchObject({ site: 'a.example.com', revision: 3 });
+    expect(reloaded).not.toHaveProperty('deletedAt');
+  });
+
+  it(`deletes items trashed ${TRASH_RETENTION_DAYS}+ days ago when it loads, in one request`, async () => {
+    const sync = deviceAt(T0);
+    await sync.load();
+    const old1 = await sync.trash(await sync.create(item('old1.example.com')));
+    const old2 = await sync.trash(await sync.create(item('old2.example.com')));
+    await sync.create(item('live.example.com'));
+    const later = deviceAt(new Date(T0.getTime() + 10 * DAY));
+    const recent = await later.trash(
+      (await later.load()).items.find((i) => i.site === 'live.example.com')!,
+    );
+
+    const loaded = await deviceAt(new Date(T0.getTime() + TRASH_RETENTION_DAYS * DAY)).load();
+    expect(calls('POST', '/vault-items/batch-delete')).toBe(1);
+    expect(loaded.items.map((i) => i.id)).toEqual([recent.id]);
+    expect(server.items.has(old1.id) || server.items.has(old2.id)).toBe(false);
+    // Recorded as deleted, so the server can't quietly bring them back.
+    expect((await thisDevice().load()).warnings).toMatchObject({ unexpectedIds: [] });
+  });
+
+  it('leaves the trash alone while the vault waits for its baseline to be confirmed', async () => {
+    const sync = deviceAt(T0);
+    await sync.load();
+    await sync.trash(await sync.create(item('old.example.com')));
+    user().manifest = null; // a server that dropped the manifest
+
+    const loaded = await new VaultSync(
+      session,
+      createRevisionLedger(EMAIL, null),
+      () => new Date(T0.getTime() + 90 * DAY),
+    ).load();
+    expect(loaded.baseline).not.toBeNull();
+    expect(loaded.items).toHaveLength(1);
+    expect(calls('POST', '/vault-items/batch-delete')).toBe(0);
+  });
+
+  it('still loads when deleting expired items fails, and tries again next time', async () => {
+    const sync = deviceAt(T0);
+    await sync.load();
+    const old = await sync.trash(await sync.create(item('old.example.com')));
+    const realFetch = globalThis.fetch;
+    vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) =>
+      String(input).endsWith('/vault-items/batch-delete')
+        ? Promise.resolve(new Response('{"message":"boom"}', { status: 500 }))
+        : realFetch(input, init),
+    );
+
+    const later = new Date(T0.getTime() + 31 * DAY);
+    expect((await deviceAt(later).load()).items.map((i) => i.id)).toEqual([old.id]);
+    vi.stubGlobal('fetch', realFetch);
+    expect((await deviceAt(later).load()).items).toEqual([]);
+  });
+});
+
+describe('batch writes', () => {
+  it('updates many items with one request and one manifest change', async () => {
+    const sync = thisDevice();
+    await sync.load();
+    const created = await sync.createMany(['a', 'b', 'c'].map((s) => item(`${s}.example.com`)));
+    const version = user().manifest!.version;
+
+    const saved = await sync.updateMany(
+      created.map((it) => ({ item: it, data: { ...it, notes: 'bulk' } })),
+    );
+    expect(saved.map((it) => [it.revision, it.notes])).toEqual([
+      [2, 'bulk'],
+      [2, 'bulk'],
+      [2, 'bulk'],
+    ]);
+    expect(user().manifest!.version).toBe(version + 1);
+    expect((await freshDevice().load()).items.every((it) => it.notes === 'bulk')).toBe(true);
+  });
+
+  it('updates more items than one batch holds in several, reporting progress', async () => {
+    const sync = thisDevice();
+    await sync.load();
+    const created = await sync.createMany(
+      Array.from({ length: VaultSync.BATCH_SIZE + 20 }, (_, i) => item(`f${i}.example.com`)),
+    );
+    const progress: number[] = [];
+    const saved = await sync.updateMany(
+      created.map((it) => ({ item: it, data: { ...it, folder: 'Archive' } })),
+      (count) => progress.push(count),
+    );
+    expect(progress).toEqual([VaultSync.BATCH_SIZE, VaultSync.BATCH_SIZE + 20]);
+    expect(saved.every((it) => it.folder === 'Archive' && it.revision === 2)).toBe(true);
+  });
+
+  it('removes many items in batches of the server’s maximum', async () => {
+    const sync = thisDevice();
+    await sync.load();
+    const created = await sync.createMany(
+      Array.from({ length: VaultSync.BATCH_SIZE + 20 }, (_, i) => item(`s${i}.example.com`)),
+    );
+    const progress: number[] = [];
+    await sync.removeMany(
+      created.map((it) => it.id),
+      (removed) => progress.push(removed),
+    );
+    expect(progress).toEqual([VaultSync.BATCH_SIZE, VaultSync.BATCH_SIZE + 20]);
+    expect(server.items.size).toBe(0);
+    expect((await freshDevice().load()).warnings.missingIds).toEqual([]);
+  });
+
+  it('reports a conflicting batch as a changed vault', async () => {
+    const sync = thisDevice();
+    await sync.load();
+    const a = await sync.create(item('a.example.com'));
+    const otherTab = thisDevice();
+    await otherTab.load();
+    await otherTab.update(a, { ...a, notes: 'elsewhere' });
+    await expect(sync.updateMany([{ item: a, data: { ...a, notes: 'here' } }])).rejects.toThrow(
+      VaultChangedError,
+    );
   });
 });

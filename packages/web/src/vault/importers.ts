@@ -1,6 +1,6 @@
 import { CsvFormatError, parseCsv } from '../lib/csv';
 import { readTotp } from '../lib/useTotp';
-import type { VaultItemData } from './items';
+import { isTrashed, normalizeFolder, type VaultItemData } from './items';
 
 /**
  * Turns another password manager's CSV export into vault items. The file is
@@ -34,6 +34,8 @@ const COLUMNS = {
   notes: ['note', 'notes'],
   totp: ['login_totp', 'otpauth', 'totp', 'one-time password'],
   type: ['type'],
+  // Bitwarden nests folders with "/", as VaultX does.
+  folder: ['folder'],
 } as const;
 
 function detectSource(headers: string[]): ImportSource {
@@ -43,6 +45,20 @@ function detectSource(headers: string[]): ImportSource {
   if (has('title') && has('otpauth')) return '1Password';
   if (has('name') && has('url') && has('username') && has('password')) return 'Chrome';
   return 'CSV';
+}
+
+/**
+ * The row's folder, normalized; one VaultX can't hold (too deep, or a name
+ * too long) is kept as a line in the notes instead, so nothing is lost.
+ */
+function folderFor(raw: string): { folder?: string; note?: string } {
+  if (!raw) return {};
+  try {
+    const folder = normalizeFolder(raw);
+    return folder ? { folder } : {};
+  } catch {
+    return { note: `Folder: ${raw}` };
+  }
 }
 
 /** The site to store: the URL's host (what autofill matches on), else the URL, else the name. */
@@ -95,6 +111,7 @@ export function parseImport(text: string): ParsedImport {
     // Bitwarden also exports notes (imported as secure notes), and cards and
     // identities, whose details its CSV doesn't include.
     const rowType = at.type === -1 ? '' : get(at.type).toLowerCase();
+    const { folder, note: folderNote } = folderFor(get(at.folder));
     if (rowType === 'note' || rowType === 'securenote') {
       const title = get(at.name);
       const body = get(at.notes);
@@ -105,7 +122,8 @@ export function parseImport(text: string): ParsedImport {
           site: title || 'Secure note',
           username: '',
           password: '',
-          notes: body,
+          notes: [body, folderNote].filter(Boolean).join('\n'),
+          ...(folder && { folder }),
         });
       continue;
     }
@@ -125,6 +143,7 @@ export function parseImport(text: string): ParsedImport {
     // There's no separate field for the name, so keep it in the notes.
     const extras = [
       name && name.toLowerCase() !== site.toLowerCase() && name !== url ? `Name: ${name}` : '',
+      folderNote ?? '',
     ].filter(Boolean);
     const notes = [get(at.notes), ...extras].filter(Boolean).join('\n');
     const totp = get(at.totp);
@@ -135,15 +154,27 @@ export function parseImport(text: string): ParsedImport {
         username,
         password,
         notes: [notes, `TOTP: ${totp}`].filter(Boolean).join('\n'),
+        ...(folder && { folder }),
       });
     } else {
-      items.push({ site, username, password, notes, ...(totp && { totp }) });
+      items.push({
+        site,
+        username,
+        password,
+        notes,
+        ...(totp && { totp }),
+        ...(folder && { folder }),
+      });
     }
   }
   return { source: detectSource(headers), items, skipped };
 }
 
-/** Leaves out items already in the vault (same site, username and password) and repeats within the file. */
+/**
+ * Leaves out items already in the vault (same site, username and password) and
+ * repeats within the file. Items in the trash don't count: importing one again
+ * brings it back as a new item.
+ */
 export function withoutDuplicates(
   incoming: VaultItemData[],
   existing: readonly VaultItemData[],
@@ -156,7 +187,7 @@ export function withoutDuplicates(
       item.password,
       item.type && item.type !== 'login' ? item.notes : '',
     ]);
-  const seen = new Set(existing.map(key));
+  const seen = new Set(existing.filter((item) => !isTrashed(item)).map(key));
   const items: VaultItemData[] = [];
   for (const item of incoming) {
     const k = key(item);

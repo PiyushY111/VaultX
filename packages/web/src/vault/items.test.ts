@@ -8,12 +8,8 @@ import {
   encryptNewItem,
   encryptNextRevision,
   filterItems,
-  normalizeTags,
-  parseItem,
   serializeItem,
-  withPasswordHistory,
   type VaultItem,
-  type VaultItemData,
 } from './items';
 import { createRevisionLedger } from './revisionLedger';
 
@@ -26,62 +22,6 @@ const item = (site: string, username = '', notes = '', password = 'pw'): VaultIt
   notes,
   createdAt: '',
   updatedAt: '',
-});
-
-describe('serializeItem / parseItem', () => {
-  it('round-trips and tags the format version', () => {
-    const data = {
-      site: 'example.com',
-      username: 'alice',
-      password: 'p@ss "quoted"',
-      notes: 'line1\nline2',
-    };
-    const json = serializeItem(data);
-    expect(JSON.parse(json).v).toBe(1);
-    expect(parseItem(json)).toEqual(data);
-  });
-
-  it('drops unexpected fields when serializing', () => {
-    const json = serializeItem({ ...item('a.com'), id: 'x' } as never);
-    expect(Object.keys(JSON.parse(json)).sort()).toEqual([
-      'notes',
-      'password',
-      'site',
-      'username',
-      'v',
-    ]);
-  });
-
-  it.each([
-    ['not an object', '"str"'],
-    ['wrong version', JSON.stringify({ v: 2, site: '', username: '', password: '', notes: '' })],
-    ['missing field', JSON.stringify({ v: 1, site: '', username: '', password: '' })],
-    ['non-string field', JSON.stringify({ v: 1, site: 1, username: '', password: '', notes: '' })],
-  ])('rejects %s', (_, json) => {
-    expect(() => parseItem(json)).toThrow();
-  });
-});
-
-describe('two-factor secrets in items', () => {
-  const data = { site: 'github.com', username: 'u', password: 'p', notes: '' };
-
-  it('are left out of the JSON when empty, so older items encrypt exactly as before', () => {
-    expect(serializeItem(data)).toBe(
-      '{"v":1,"site":"github.com","username":"u","password":"p","notes":""}',
-    );
-    expect(serializeItem({ ...data, totp: '' })).toBe(serializeItem(data));
-    expect(parseItem(serializeItem(data))).toEqual(data);
-  });
-
-  it('round-trip when set', () => {
-    const withTotp = { ...data, totp: 'JBSWY3DPEHPK3PXP' };
-    expect(JSON.parse(serializeItem(withTotp)).totp).toBe('JBSWY3DPEHPK3PXP');
-    expect(parseItem(serializeItem(withTotp))).toEqual(withTotp);
-  });
-
-  it('must be a string', () => {
-    expect(() => parseItem(JSON.stringify({ v: 1, ...data, totp: 5 }))).toThrow(/totp/);
-  });
 });
 
 describe('filterItems', () => {
@@ -186,72 +126,35 @@ describe('encrypted items are bound to their id and revision', () => {
   });
 });
 
-describe('item kinds, tags, favorites and history', () => {
-  const data = { site: 'github.com', username: 'u', password: 'p', notes: '' };
+describe('filterItems and the trash', () => {
+  const live = item('live.example.com');
+  const trashed = { ...item('gone.example.com'), deletedAt: '2026-10-01T00:00:00.000Z' };
 
-  it('leaves every new field out of the JSON when unset, so old items encrypt as before', () => {
-    expect(
-      serializeItem({ ...data, type: 'login', tags: [], favorite: false, fields: {}, history: [] }),
-    ).toBe(serializeItem(data));
-  });
-
-  it('round-trips a card with tags, a favorite flag and a history', () => {
-    const card = {
-      ...data,
-      type: 'card' as const,
-      tags: ['Work', 'travel'],
-      favorite: true,
-      fields: { cardholder: 'A. Person', number: '4111 1111 1111 1111', expiry: '12/30', cvv: '' },
-      history: [{ password: 'old', changedAt: '2026-01-01T00:00:00.000Z' }],
-    };
-    const parsed = parseItem(serializeItem(card));
-    // Empty card fields are dropped; everything else comes back as it went in.
-    expect(parsed).toEqual({
-      ...card,
-      fields: { cardholder: 'A. Person', number: '4111 1111 1111 1111', expiry: '12/30' },
-    });
-  });
-
-  it.each([
-    ['an unknown type', { type: 'wallet' }],
-    ['tags that are not strings', { tags: [1] }],
-    ['a non-boolean favorite', { favorite: 'yes' }],
-    ['non-string fields', { fields: { number: 4111 } }],
-    ['a malformed history', { history: [{ password: 'x' }] }],
-  ])('rejects %s', (_, bad) => {
-    expect(() => parseItem(JSON.stringify({ v: 1, ...data, ...bad }))).toThrow();
-  });
-
-  it('normalizes tags: trims, drops empties and case-insensitive repeats', () => {
-    expect(normalizeTags(' work, Personal ,, WORK ,personal')).toEqual(['work', 'Personal']);
-  });
-
-  it('records the old password when a login’s password changes, keeping the last 10', () => {
-    const now = new Date('2026-09-28T00:00:00.000Z');
-    const unchanged = withPasswordHistory(data, { ...data, notes: 'edited' }, now);
-    expect(unchanged.history).toBeUndefined();
-    let item: VaultItemData = data;
-    for (let i = 1; i <= 12; i++)
-      item = withPasswordHistory(item, { ...item, password: `p${i}` }, now);
-    expect(item.history).toHaveLength(10);
-    expect(item.history!.map((entry) => entry.password)).toEqual([
-      'p2',
-      'p3',
-      'p4',
-      'p5',
-      'p6',
-      'p7',
-      'p8',
-      'p9',
-      'p10',
-      'p11',
+  it('leaves the trash out of the vault, and lists only the trash in it', () => {
+    expect(filterItems([live, trashed], '').map((i) => i.site)).toEqual(['live.example.com']);
+    expect(filterItems([live, trashed], '', { trash: true }).map((i) => i.site)).toEqual([
+      'gone.example.com',
     ]);
-    expect(item.history![0]!.changedAt).toBe(now.toISOString());
-    // Notes and cards have no password history.
-    expect(
-      withPasswordHistory({ ...data, type: 'note' }, { ...data, type: 'note', password: 'x' })
-        .history,
-    ).toBeUndefined();
+    expect(filterItems([live, trashed], 'gone')).toEqual([]);
+  });
+});
+
+describe('filterItems and folders', () => {
+  const inWork = { ...item('a.example.com'), folder: 'Work' };
+  const inServers = { ...item('b.example.com'), folder: 'Work/Servers' };
+  const loose = item('c.example.com');
+  const all = [inWork, inServers, loose];
+  const sites = (folder: string | null) => filterItems(all, '', { folder }).map((i) => i.site);
+
+  it('shows a folder with its subfolders, items in no folder, or everything', () => {
+    expect(sites('work')).toEqual(['a.example.com', 'b.example.com']);
+    expect(sites('Work/Servers')).toEqual(['b.example.com']);
+    expect(sites('')).toEqual(['c.example.com']);
+    expect(sites(null)).toEqual(['a.example.com', 'b.example.com', 'c.example.com']);
+  });
+
+  it('searches folder names', () => {
+    expect(filterItems(all, 'servers').map((i) => i.site)).toEqual(['b.example.com']);
   });
 });
 

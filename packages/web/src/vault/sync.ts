@@ -15,6 +15,7 @@ import {
   encryptNextRevision,
   isLegacyItem,
   toVaultItem,
+  trashExpired,
   type VaultItem,
   type VaultItemData,
 } from './items';
@@ -120,6 +121,24 @@ function rethrow(error: unknown): never {
   throw error;
 }
 
+/**
+ * For batch writes, a stale item (409 with current_revision) means the same
+ * as a stale manifest: something changed elsewhere, so reload and try again.
+ */
+function rethrowBatch(error: unknown): never {
+  if (error instanceof ApiError && error.status === 409 && 'current_revision' in error.details) {
+    throw new VaultChangedError({ cause: error });
+  }
+  rethrow(error);
+}
+
+/** The error a batch write throws once some batches are saved and a later one fails. */
+function partialFailure(done: number, total: number, verb: string, error: unknown): Error {
+  return new Error(`${verb} ${done} of ${total} items, then stopped: ${(error as Error).message}`, {
+    cause: error,
+  });
+}
+
 export class VaultSync {
   /** The manifest the next write builds on. Null only before the first load. */
   private manifest: VaultManifest | null = null;
@@ -129,6 +148,7 @@ export class VaultSync {
   constructor(
     private readonly session: VaultSession,
     private readonly ledger: RevisionLedger,
+    private readonly now: () => Date = () => new Date(),
   ) {}
 
   async load(): Promise<LoadedVault> {
@@ -192,8 +212,11 @@ export class VaultSync {
     }
 
     return {
-      // Legacy items are re-saved (a write) only once there's a trusted manifest.
-      items: this.pendingBaseline ? items : await this.upgradeLegacyItems(items),
+      // Legacy items are re-saved, and expired trash deleted (both writes), only
+      // once there's a trusted manifest.
+      items: this.pendingBaseline
+        ? items
+        : await this.purgeExpiredTrash(await this.upgradeLegacyItems(items)),
       warnings,
       lastChanged: manifest?.updatedAt ? { at: manifest.updatedAt, by: manifest.updatedBy } : null,
       baseline: this.pendingBaseline,
@@ -337,6 +360,76 @@ export class VaultSync {
     }
   }
 
+  /** Moves an item to the trash: an ordinary new revision with `deletedAt` set. */
+  trash(item: VaultItem): Promise<VaultItem> {
+    return this.update(item, { ...item, deletedAt: this.now().toISOString() });
+  }
+
+  /** Takes an item out of the trash. */
+  restore(item: VaultItem): Promise<VaultItem> {
+    const data: VaultItemData = { ...item };
+    delete data.deletedAt;
+    return this.update(item, data);
+  }
+
+  /**
+   * Saves the next revision of many items, a batch at a time, each batch with
+   * its manifest change in one transaction. If a batch fails, the ones before
+   * it stay saved and the error says how far it got.
+   */
+  async updateMany(
+    changes: readonly { item: VaultItem; data: VaultItemData }[],
+    onProgress?: (saved: number) => void,
+  ): Promise<VaultItem[]> {
+    const saved: VaultItem[] = [];
+    for (let start = 0; start < changes.length; start += VaultSync.BATCH_SIZE) {
+      const batch = changes.slice(start, start + VaultSync.BATCH_SIZE);
+      const payloads = await Promise.all(
+        batch.map(({ item, data }) => encryptNextRevision(item, data, this.session.vaultKey)),
+      );
+      const manifest = this.next({
+        set: payloads.map(({ id, revision }) => ({ id, revision })),
+      });
+      try {
+        const { items } = await api.updateItems(
+          this.session.token,
+          payloads,
+          await encryptManifestPayload(manifest, this.session.vaultKey),
+        );
+        this.commit(manifest, items);
+        saved.push(...items.map((response, i) => toVaultItem(response, batch[i]!.data)));
+        onProgress?.(saved.length);
+      } catch (error) {
+        if (saved.length === 0) rethrowBatch(error);
+        throw partialFailure(saved.length, changes.length, 'Saved', error);
+      }
+    }
+    return saved;
+  }
+
+  /** Deletes many items for good, a batch at a time (see {@link updateMany}). */
+  async removeMany(ids: readonly string[], onProgress?: (removed: number) => void): Promise<void> {
+    let removed = 0;
+    for (let start = 0; start < ids.length; start += VaultSync.BATCH_SIZE) {
+      const batch = ids.slice(start, start + VaultSync.BATCH_SIZE);
+      const manifest = this.next({ remove: batch });
+      try {
+        await api.deleteItems(
+          this.session.token,
+          batch,
+          await encryptManifestPayload(manifest, this.session.vaultKey),
+        );
+      } catch (error) {
+        if (removed === 0) rethrowBatch(error);
+        throw partialFailure(removed, ids.length, 'Deleted', error);
+      }
+      this.commit(manifest);
+      for (const id of batch) this.ledger.markDeleted(id);
+      removed += batch.length;
+      onProgress?.(removed);
+    }
+  }
+
   async remove(id: string): Promise<void> {
     const manifest = this.next({ remove: [id] });
     try {
@@ -350,6 +443,27 @@ export class VaultSync {
     }
     this.commit(manifest);
     this.ledger.markDeleted(id);
+  }
+
+  /**
+   * Deletes items that have been in the trash for TRASH_RETENTION_DAYS. Only
+   * a client can do this, since the server can't read when an item was
+   * trashed. Best effort, like the legacy upgrade: whatever isn't deleted now
+   * stays in the trash and is tried again on the next load.
+   */
+  private async purgeExpiredTrash(items: VaultItem[]): Promise<VaultItem[]> {
+    const now = this.now();
+    const expired = items.filter((item) => trashExpired(item, now)).map((item) => item.id);
+    if (expired.length === 0) return items;
+    let removed = 0;
+    try {
+      await this.removeMany(expired, (count) => (removed = count));
+    } catch (error) {
+      const cause = error instanceof Error && error.cause ? error.cause : error;
+      if (cause instanceof ApiError && cause.status === 401) throw cause;
+    }
+    const gone = new Set(expired.slice(0, removed));
+    return items.filter((item) => !gone.has(item.id));
   }
 
   /**

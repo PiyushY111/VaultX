@@ -526,6 +526,44 @@ export function installFakeServer(): FakeServer {
       });
       return json(201, { items: created });
     }
+    if (method === 'PUT' && path === '/vault-items/batch') {
+      // All or nothing, like the real server: every item must be ours, at the previous revision.
+      const sent = body.items as (StoredItem & { revision: number })[];
+      if (sent.length > 500 || new Set(sent.map((i) => i.id)).size !== sent.length)
+        return json(400, { message: 'Bad batch' });
+      for (const next of sent) {
+        const current = items.get(next.id);
+        if (!current || current.owner !== owner) return json(404, { message: 'Not found' });
+        if (next.revision !== current.revision + 1) {
+          return json(409, {
+            message: 'An item was changed elsewhere since it was loaded.',
+            id: current.id,
+            current_revision: current.revision,
+          });
+        }
+      }
+      const conflict = manifestConflict(body.manifest);
+      if (conflict) return conflict;
+      user.manifest = body.manifest;
+      const saved = sent.map((next) => {
+        const item = items.get(next.id)!;
+        Object.assign(item, next, { updated_at: now });
+        return publicItem(item);
+      });
+      return json(200, { items: saved });
+    }
+    if (method === 'POST' && path === '/vault-items/batch-delete') {
+      const ids = body.ids as string[];
+      if (ids.length === 0 || ids.length > 500 || new Set(ids).size !== ids.length)
+        return json(400, { message: 'Bad batch' });
+      if (ids.some((id) => items.get(id)?.owner !== owner))
+        return json(404, { message: 'Not found' });
+      const conflict = manifestConflict(body.manifest);
+      if (conflict) return conflict;
+      user.manifest = body.manifest;
+      for (const id of ids) items.delete(id);
+      return noContent();
+    }
     if (method === 'POST' && path === '/vault-items') {
       if (body.revision !== 1 || items.has(body.id)) return json(409, { message: 'Conflict' });
       const { manifest, ...fields } = body;

@@ -57,8 +57,32 @@ describe('parseImport', () => {
         password: 'gl-pass',
         // A secret that doesn't parse is kept in the notes rather than lost.
         notes: 'multi\nline\nName: GitLab\nTOTP: otpauth://totp/GitLab?secret=ABC',
+        folder: 'Work',
       },
       { type: 'note', site: 'My secret note', username: '', password: '', notes: 'just a note' },
+    ]);
+  });
+
+  it('keeps Bitwarden folders, nested ones too, and a folder too deep to keep goes in the notes', () => {
+    const csv = `folder,favorite,type,name,notes,fields,reprompt,login_uri,login_username,login_password,login_totp
+Home / Bills,,note,Rent,paid,,0,,,,
+a/b/c/d/e/f,,login,Deep,,,0,https://deep.example.com,u,p,
+`;
+    expect(parseImport(csv).items).toEqual([
+      {
+        type: 'note',
+        site: 'Rent',
+        username: '',
+        password: '',
+        notes: 'paid',
+        folder: 'Home/Bills',
+      },
+      {
+        site: 'deep.example.com',
+        username: 'u',
+        password: 'p',
+        notes: 'Name: Deep\nFolder: a/b/c/d/e/f',
+      },
     ]);
   });
 
@@ -109,5 +133,11 @@ describe('withoutDuplicates', () => {
       items: [{ site: 'github.com', username: 'u', password: 'NEW', notes: '' }],
       duplicates: 2,
     });
+  });
+
+  it('imports again what is in the trash', () => {
+    const login = { site: 'github.com', username: 'u', password: 'p', notes: '' };
+    const trashed = { ...login, deletedAt: '2026-10-01T00:00:00.000Z' };
+    expect(withoutDuplicates([login], [trashed])).toEqual({ items: [login], duplicates: 0 });
   });
 });

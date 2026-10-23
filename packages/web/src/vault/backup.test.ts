@@ -25,6 +25,19 @@ describe('encrypted backups', () => {
     expect(await readBackup(file, PASSWORD)).toEqual(ITEMS);
   });
 
+  it('keep fields from newer versions, so restoring loses nothing', async () => {
+    const items = [{ ...ITEMS[0]!, extra: { futureLabel: 'Work', futureMode: 'exact' } }];
+    expect(await readBackup(await createBackup(items, PASSWORD), PASSWORD)).toEqual(items);
+  });
+
+  it('keep folders and the trash', async () => {
+    const items = [
+      { ...ITEMS[0]!, folder: 'Work/Servers' },
+      { ...ITEMS[1]!, deletedAt: '2026-10-01T00:00:00.000Z' },
+    ];
+    expect(await readBackup(await createBackup(items, PASSWORD), PASSWORD)).toEqual(items);
+  });
+
   it('refuses a wrong password', async () => {
     const file = await createBackup(ITEMS, PASSWORD);
     await expect(readBackup(file, 'not-the-password')).rejects.toThrow(WrongBackupPasswordError);
