@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { normalizeServerUrl, securePageHost, siteHost, siteMatchesHost } from '../src/shared/urls';
+import { normalizeServerUrl, securePageHost, siteHost } from '../src/shared/urls';
 
 describe('siteHost', () => {
   it.each([
@@ -38,21 +38,7 @@ describe('securePageHost', () => {
   });
 });
 
-describe('siteMatchesHost', () => {
-  it('matches the same host and its subdomains', () => {
-    expect(siteMatchesHost('example.com', 'example.com')).toBe(true);
-    expect(siteMatchesHost('example.com', 'login.example.com')).toBe(true);
-    expect(siteMatchesHost('https://www.example.com', 'example.com')).toBe(true);
-  });
-
-  it('does not match lookalikes or parent domains', () => {
-    expect(siteMatchesHost('example.com', 'example.com.evil.net')).toBe(false);
-    expect(siteMatchesHost('example.com', 'notexample.com')).toBe(false);
-    expect(siteMatchesHost('example.com', 'examp1e.com')).toBe(false);
-    expect(siteMatchesHost('login.example.com', 'example.com')).toBe(false);
-    expect(siteMatchesHost('com', 'example.com')).toBe(false);
-  });
-});
+// Matching moved to background/matching.ts (test/matching.test.ts).
 
 describe('normalizeServerUrl', () => {
   it('accepts https and localhost http, trimming trailing slashes', () => {

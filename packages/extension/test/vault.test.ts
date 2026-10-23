@@ -1,8 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_SETTINGS } from '../src/background/settings';
 import { formatCheckpoint, vaultCheckpoint } from '@password-manager/crypto';
+import { decryptVaultItems } from '../src/background/items';
 import {
   BaselineRequiredError,
+  GENERATED_TTL_MS,
   LockedError,
   PENDING_SAVE_TTL_MS,
   SecondFactorRequiredError,
@@ -181,6 +183,203 @@ describe('autofill matching', () => {
   });
 });
 
+describe('generated passwords', () => {
+  const TAB = 31;
+
+  it('are kept per tab, memory only, even while locked, and nothing is sent anywhere', async () => {
+    const vault = makeVault();
+    const requests = server.requests.length;
+    await vault.rememberGenerated(TAB, 'new.example.com', 'GENERATED-PW-1');
+    expect(await vault.generatedFor(TAB)).toEqual({
+      host: 'new.example.com',
+      password: 'GENERATED-PW-1',
+      createdAt: clock,
+    });
+    expect(await vault.generatedFor(TAB + 1)).toBeNull();
+    expect(JSON.stringify([...local.data])).not.toContain('GENERATED-PW-1');
+    expect(server.requests).toHaveLength(requests);
+  });
+
+  it(`are forgotten after ${GENERATED_TTL_MS / 60_000} minutes, when the tab closes, or on lock`, async () => {
+    const vault = makeVault();
+    await vault.unlock(EMAIL, PASSWORD);
+    await vault.rememberGenerated(TAB, 'a.example.com', 'pw');
+    clock += GENERATED_TTL_MS;
+    expect(await vault.generatedFor(TAB)).toBeNull();
+
+    await vault.rememberGenerated(TAB, 'a.example.com', 'pw');
+    await vault.forgetTab(TAB);
+    expect(await vault.generatedFor(TAB)).toBeNull();
+
+    await vault.rememberGenerated(TAB, 'a.example.com', 'pw');
+    await vault.lock();
+    expect(await vault.generatedFor(TAB)).toBeNull();
+  });
+
+  it('are forgotten once the save prompt saves them', async () => {
+    const vault = makeVault();
+    await vault.unlock(EMAIL, PASSWORD);
+    await vault.rememberGenerated(TAB, 'signup.example.com', 'GEN-PW');
+    await vault.captureCredential(TAB, 'https://signup.example.com/join', 'newbie', 'GEN-PW');
+    await vault.resolvePendingSave(TAB, true);
+    expect(await vault.generatedFor(TAB)).toBeNull();
+  });
+});
+
+describe('match modes', () => {
+  const TAB = 21;
+  const login = (site: string, extra: object = {}) => ({
+    site,
+    username: 'me',
+    password: 'MATCH-MODE-PW',
+    notes: '',
+    ...extra,
+  });
+
+  it('a “never” login is listed in the popup but never offered or released for a page', async () => {
+    const id = await server.seedItem(vaultKey, login('quiet.example.com', { match: 'never' }));
+    const vault = makeVault();
+    await vault.unlock(EMAIL, PASSWORD);
+    expect(await vault.matchesForUrl('https://quiet.example.com/')).toEqual([]);
+    await expect(vault.credentialFor(id, 'https://quiet.example.com/')).rejects.toThrow(
+      'No matching login',
+    );
+    expect((await vault.listForPopup()).map((item) => item.id)).toContain(id);
+  });
+
+  it('a login saved for a public suffix matches nothing; “domain” spans the whole site', async () => {
+    await server.seedItem(vaultKey, login('co.uk'));
+    const wide = await server.seedItem(vaultKey, login('login.shop.co.uk', { match: 'domain' }));
+    const vault = makeVault();
+    await vault.unlock(EMAIL, PASSWORD);
+    expect(await vault.matchesForUrl('https://bbc.co.uk/')).toEqual([]);
+    expect((await vault.matchesForUrl('https://www.shop.co.uk/')).map((m) => m.id)).toEqual([wide]);
+  });
+
+  it('the save prompt still recognizes a “never” login, so it offers an update, not a duplicate', async () => {
+    const id = await server.seedItem(vaultKey, login('quiet.example.com', { match: 'never' }));
+    const vault = makeVault();
+    await vault.unlock(EMAIL, PASSWORD);
+    await vault.captureCredential(TAB, 'https://quiet.example.com/login', 'me', 'NEW-PW');
+    expect(await vault.pendingSavePrompt(TAB)).toMatchObject({ kind: 'update' });
+    await vault.resolvePendingSave(TAB, true);
+    expect(server.items.find((item) => item.id === id)!.revision).toBe(2);
+  });
+});
+
+describe('cards and identities', () => {
+  const CARD = {
+    type: 'card' as const,
+    site: 'Visa',
+    username: '',
+    password: '',
+    notes: '',
+    fields: {
+      cardholder: 'Jane Q Doe',
+      number: '4111 1111 1111 4242',
+      expiry: '03/27',
+      cvv: '987',
+    },
+  };
+  const IDENTITY = {
+    type: 'identity' as const,
+    site: 'Home',
+    username: '',
+    password: '',
+    notes: '',
+    fields: { firstName: 'Jane', lastName: 'Doe', address: 'Hauptstr. 1', city: 'Berlin' },
+  };
+  const SHOP = 'https://shop.example.com/checkout';
+
+  it('offers pages labels only: never the number, expiry, security code or address', async () => {
+    const cardId = await server.seedItem(vaultKey, CARD);
+    const identityId = await server.seedItem(vaultKey, IDENTITY);
+    await server.seedItem(vaultKey, { ...CARD, deletedAt: '2026-10-01T00:00:00.000Z' });
+    const vault = makeVault();
+    await vault.unlock(EMAIL, PASSWORD);
+
+    const cards = await vault.formItemSummaries('card', SHOP);
+    expect(cards).toEqual([{ id: cardId, label: 'Visa •••• 4242 · Jane D.' }]);
+    const identities = await vault.formItemSummaries('identity', SHOP);
+    expect(identities).toEqual([{ id: identityId, label: 'Home · Jane' }]);
+    const offered = JSON.stringify([cards, identities]);
+    for (const secret of ['4111', '03/27', '987', 'Hauptstr', 'Berlin', 'Doe']) {
+      expect(offered).not.toContain(secret);
+    }
+  });
+
+  it('releases an item’s fields only for a secure page, and only for its own kind', async () => {
+    const cardId = await server.seedItem(vaultKey, CARD);
+    const vault = makeVault();
+    await vault.unlock(EMAIL, PASSWORD);
+
+    expect(await vault.formFillFor(cardId, SHOP, 'card')).toEqual({
+      kind: 'card',
+      host: 'shop.example.com',
+      values: CARD.fields,
+    });
+    expect(await vault.formItemSummaries('card', 'http://shop.example.com/')).toEqual([]);
+    await expect(vault.formFillFor(cardId, 'http://shop.example.com/', 'card')).rejects.toThrow(
+      'https',
+    );
+    await expect(vault.formFillFor(cardId, SHOP, 'identity')).rejects.toThrow('no longer');
+    await expect(vault.formFillFor(githubId, SHOP, 'card')).rejects.toThrow('no longer');
+  });
+
+  it('lists cards and identities for the popup, leaving the trash out', async () => {
+    await server.seedItem(vaultKey, CARD);
+    await server.seedItem(vaultKey, IDENTITY);
+    await server.seedItem(vaultKey, {
+      ...IDENTITY,
+      site: 'Old',
+      deletedAt: '2026-10-01T00:00:00.000Z',
+    });
+    const vault = makeVault();
+    await vault.unlock(EMAIL, PASSWORD);
+    const listed = await vault.formItemsForPopup();
+    expect(listed.cards.map((c) => c.label)).toEqual(['Visa •••• 4242 · Jane D.']);
+    expect(listed.identities.map((i) => i.label)).toEqual(['Home · Jane']);
+  });
+});
+
+describe('items in the trash', () => {
+  const TAB = 11;
+  const TRASHED = {
+    site: 'trashed.example.com',
+    username: 'old-me',
+    password: 'TRASHED-ITEM-PASSWORD',
+    notes: '',
+    totp: 'JBSWY3DPEHPK3PXP',
+    deletedAt: '2026-10-01T00:00:00.000Z',
+  };
+
+  it('are never listed, matched, filled or given a two-factor code', async () => {
+    const trashedId = await server.seedItem(vaultKey, TRASHED);
+    const vault = makeVault();
+    await vault.unlock(EMAIL, PASSWORD);
+    const page = 'https://trashed.example.com/login';
+
+    expect(await vault.matchesForUrl(page)).toEqual([]);
+    expect(await vault.totpMatchesForUrl(page)).toEqual([]);
+    expect((await vault.listForPopup()).map((item) => item.id)).not.toContain(trashedId);
+    await expect(vault.credentialFor(trashedId, page)).rejects.toThrow('No matching login');
+    await expect(vault.totpCodeForUrl(trashedId, page)).rejects.toThrow('No matching login');
+  });
+
+  it('don’t count as already saved, so the save prompt offers a new login', async () => {
+    const trashedId = await server.seedItem(vaultKey, TRASHED);
+    const vault = makeVault();
+    await vault.unlock(EMAIL, PASSWORD);
+    await vault.captureCredential(TAB, 'https://trashed.example.com/login', 'old-me', 'NEW-PW');
+    expect(await vault.pendingSavePrompt(TAB)).toMatchObject({ kind: 'new' });
+
+    await vault.resolvePendingSave(TAB, true);
+    // A new item; the trashed one is untouched.
+    expect(server.items.find((item) => item.id === trashedId)!.revision).toBe(1);
+    expect(await vault.matchesForUrl('https://trashed.example.com/')).toHaveLength(1);
+  });
+});
+
 describe('save prompt', () => {
   const TAB = 7;
 
@@ -226,6 +425,33 @@ describe('save prompt', () => {
     await vault.resolvePendingSave(TAB, true);
     expect(server.requests.at(-1)!.method).toBe('PUT');
     expect((await vault.credentialFor(githubId, 'https://github.com')).password).toBe('ROTATED');
+  });
+
+  it('keeps fields from newer versions when it updates a login’s password', async () => {
+    const id = await server.seedItem(vaultKey, {
+      site: 'gitlab.com',
+      username: 'tanuki',
+      password: 'OLD',
+      notes: '',
+      extra: { futureLabel: 'Work', futureDate: '2026-10-01T00:00:00.000Z' },
+    });
+    const vault = makeVault();
+    await vault.unlock(EMAIL, PASSWORD);
+    await vault.captureCredential(TAB, 'https://gitlab.com/users/sign_in', 'tanuki', 'NEW');
+    await vault.resolvePendingSave(TAB, true);
+
+    const stored = server.items.find((item) => item.id === id)!;
+    const { items } = await decryptVaultItems(
+      [{ ...stored, created_at: '', updated_at: '' }],
+      vaultKey,
+    );
+    expect(items).toMatchObject([
+      {
+        password: 'NEW',
+        history: [{ password: 'OLD' }],
+        extra: { futureLabel: 'Work', futureDate: '2026-10-01T00:00:00.000Z' },
+      },
+    ]);
   });
 
   it('does not offer to save a credential that is already saved', async () => {

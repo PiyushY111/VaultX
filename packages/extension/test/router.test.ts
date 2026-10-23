@@ -79,7 +79,7 @@ describe('handleMessage authorization', () => {
       }),
       settingsStore,
       clipboard: { scheduleClear: vi.fn(async () => {}) },
-      tabs: { getUrl: vi.fn(), sendFill: vi.fn(), notifyUnlocked: vi.fn() },
+      tabs: { getUrl: vi.fn(), sendFill: vi.fn(), sendFillForm: vi.fn(), notifyUnlocked: vi.fn() },
     };
   });
 
@@ -260,5 +260,93 @@ describe('handleMessage authorization', () => {
       ),
     ).toMatchObject({ ok: true });
     expect(await deps.vault.isUnlocked()).toBe(false);
+  });
+});
+
+describe('cards and identities across the boundary', () => {
+  const content: Sender = { kind: 'content', tabId: 4, url: 'https://shop.example.com/checkout' };
+  const popup: Sender = { kind: 'popup' };
+  const CARD = {
+    type: 'card' as const,
+    site: 'Visa',
+    username: '',
+    password: '',
+    notes: '',
+    fields: { cardholder: 'Jane Doe', number: '4111111111114242', expiry: '03/27', cvv: '987' },
+  };
+
+  async function setup() {
+    const server = createFakeServer();
+    const vaultKey = await server.register('a@example.com', 'MASTER-password-123');
+    const cardId = await server.seedItem(vaultKey, CARD);
+    const deps: RouterDeps = {
+      vault: new Vault({
+        session: new MemoryStore(),
+        local: new MemoryStore(),
+        fetch: server.fetch,
+        now: () => Date.now(),
+        getSettings: async () => ({ ...DEFAULT_SETTINGS, serverUrl: SERVER }),
+      }),
+      settingsStore: new MemoryStore(),
+      clipboard: { scheduleClear: vi.fn(async () => {}) },
+      tabs: { getUrl: vi.fn(), sendFill: vi.fn(), sendFillForm: vi.fn(), notifyUnlocked: vi.fn() },
+    };
+    const unlock = () =>
+      handleMessage(
+        { type: 'unlock', email: 'a@example.com', password: 'MASTER-password-123' },
+        popup,
+        deps,
+      );
+    return { deps, cardId, unlock };
+  }
+
+  it('tells a page the vault is locked, then offers labels only', async () => {
+    const { deps, cardId, unlock } = await setup();
+    expect(await handleMessage({ type: 'getFormItems', kind: 'card' }, content, deps)).toEqual({
+      ok: false,
+      error: 'Vault is locked',
+      locked: true,
+    });
+    await unlock();
+    const offered = await handleMessage({ type: 'getFormItems', kind: 'card' }, content, deps);
+    expect(offered).toEqual({
+      ok: true,
+      data: [{ id: cardId, label: 'Visa •••• 4242 · Jane D.' }],
+    });
+  });
+
+  it('fills a card for the page that asked, and refuses a made-up kind', async () => {
+    const { deps, cardId, unlock } = await setup();
+    await unlock();
+    expect(
+      await handleMessage({ type: 'fillFormItem', kind: 'card', itemId: cardId }, content, deps),
+    ).toEqual({
+      ok: true,
+      data: { kind: 'card', host: 'shop.example.com', values: CARD.fields },
+    });
+    expect(
+      await handleMessage({ type: 'fillFormItem', kind: 'login', itemId: cardId }, content, deps),
+    ).toMatchObject({ ok: false, error: 'Unknown kind of item' });
+  });
+
+  it('fills the active tab from the popup, using the tab’s own URL', async () => {
+    const { deps, cardId, unlock } = await setup();
+    await unlock();
+    vi.mocked(deps.tabs.getUrl).mockResolvedValue('https://shop.example.com/pay');
+    expect(
+      await handleMessage({ type: 'fillTabWithForm', tabId: 9, itemId: cardId }, popup, deps),
+    ).toEqual({ ok: true, data: null });
+    expect(deps.tabs.sendFillForm).toHaveBeenCalledWith(9, {
+      type: 'fillForm',
+      kind: 'card',
+      host: 'shop.example.com',
+      values: CARD.fields,
+    });
+
+    vi.mocked(deps.tabs.getUrl).mockResolvedValue('http://shop.example.com/pay');
+    expect(
+      await handleMessage({ type: 'fillTabWithForm', tabId: 9, itemId: cardId }, popup, deps),
+    ).toMatchObject({ ok: false, error: expect.stringContaining('https') });
+    expect(deps.tabs.sendFillForm).toHaveBeenCalledTimes(1);
   });
 });

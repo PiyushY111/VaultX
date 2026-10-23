@@ -40,6 +40,40 @@ const TWO_FACTOR_PAGE = `<!doctype html><title>Two-factor</title><h1>Enter your 
   <button type="submit">Verify</button>
 </form>`;
 
+/** A 2FA step with one box per digit; `script` is the page's own widget code. */
+const splitCodePage = (script: string) => `<!doctype html><title>Verify</title>
+<h1>Two-factor authentication</h1>
+<form method="post" action="/welcome"><div class="otp">${Array.from(
+  { length: 6 },
+  (_, i) => `<input id="d${i}" maxlength="1" inputmode="numeric">`,
+).join('')}</div><button type="submit">Verify</button></form>
+<script>const boxes = [...document.querySelectorAll('.otp input')];${script}</script>`;
+
+// Typed digits are kept and move focus on, like most OTP widgets.
+const SPLIT_CODE_PAGE = splitCodePage(`
+boxes.forEach((box, i) => box.addEventListener('input', () => {
+  box.value = box.value.replace(/\\D/g, '').slice(-1);
+  if (box.value) boxes[i + 1]?.focus();
+}));`);
+
+// Typing is rejected; only a paste into the first box fills them all.
+const PASTE_ONLY_CODE_PAGE = splitCodePage(`
+boxes.forEach((box) => box.addEventListener('input', () => { box.value = ''; }));
+boxes[0].addEventListener('paste', (event) => {
+  event.preventDefault();
+  const digits = event.clipboardData.getData('text/plain').replace(/\\D/g, '');
+  boxes.forEach((box, i) => { box.value = digits[i] ?? ''; });
+});`);
+
+const CHECKOUT_PAGE = `<!doctype html><title>Checkout</title><h1>Payment</h1>
+<form method="post" action="/welcome">
+  <label>Name on card <input id="cc-name" autocomplete="cc-name"></label>
+  <label>Card number <input id="cc-number" autocomplete="cc-number" inputmode="numeric"></label>
+  <label>Expiry <input id="cc-exp" autocomplete="cc-exp" placeholder="MM/YY" maxlength="5"></label>
+  <label>CVC <input id="cc-csc" autocomplete="cc-csc" inputmode="numeric"></label>
+  <button type="submit">Pay</button>
+</form>`;
+
 let site: Server;
 let sitePort: number;
 
@@ -49,9 +83,15 @@ base.beforeAll(async () => {
     response.end(
       request.url?.startsWith('/welcome')
         ? '<!doctype html><title>Welcome</title><h1>Welcome</h1>'
-        : request.url?.startsWith('/2fa')
-          ? TWO_FACTOR_PAGE
-          : LOGIN_PAGE,
+        : request.url?.startsWith('/2fa-boxes')
+          ? SPLIT_CODE_PAGE
+          : request.url?.startsWith('/2fa-paste')
+            ? PASTE_ONLY_CODE_PAGE
+            : request.url?.startsWith('/2fa')
+              ? TWO_FACTOR_PAGE
+              : request.url?.startsWith('/checkout')
+                ? CHECKOUT_PAGE
+                : LOGIN_PAGE,
     );
   });
   await new Promise<void>((resolve) => site.listen(0, '127.0.0.1', resolve));
@@ -130,7 +170,14 @@ async function apiToken(account: Account): Promise<string> {
 
 async function addItem(
   account: Account,
-  data: { site: string; username: string; password: string; totp?: string },
+  data: {
+    site: string;
+    username: string;
+    password: string;
+    totp?: string;
+    type?: 'card' | 'identity';
+    fields?: Record<string, string>;
+  },
 ) {
   const id = crypto.randomUUID();
   const token = await apiToken(account);
@@ -593,3 +640,70 @@ test('fills a two-factor code on the site’s 2FA page, after a click', async ({
     await context.close();
   }
 });
+
+test('fills a saved card on a checkout page after a click, never on load', async ({
+  userDataDir,
+}) => {
+  const account = await createAccount();
+  await addItem(account, {
+    type: 'card',
+    site: 'Visa',
+    username: '',
+    password: '',
+    fields: { cardholder: 'Jane Doe', number: '4111 1111 1111 4242', expiry: '03/27', cvv: '987' },
+  });
+  const { context, extensionId } = await launch(userDataDir);
+  try {
+    const popup = await openPopup(context, extensionId);
+    await unlockInPopup(popup, account);
+    const cards = popup.getByRole('region', { name: 'Cards and identities' });
+    await expect(cards.getByRole('listitem', { name: 'Visa •••• 4242 · Jane D.' })).toBeVisible();
+
+    const page = await context.newPage();
+    await page.goto(`http://127.0.0.1:${sitePort}/checkout`);
+    await expectPrompt(page, /Fill card\?.*Visa •••• 4242/);
+    await expect(page.locator('#cc-number')).toHaveValue('');
+    await clickPromptButton(page, 'Fill');
+    await expect(page.locator('#cc-number')).toHaveValue('4111111111114242');
+    await expect(page.locator('#cc-exp')).toHaveValue('03/27');
+    await expect(page.locator('#cc-csc')).toHaveValue('987');
+    await expect(page.locator('#cc-name')).toHaveValue('Jane Doe');
+  } finally {
+    await context.close();
+  }
+});
+
+for (const [path, kind] of [
+  ['/2fa-boxes', 'one box per digit'],
+  ['/2fa-paste', 'boxes that only take a paste'],
+] as const) {
+  test(`fills a two-factor code split into ${kind}, after a click`, async ({ userDataDir }) => {
+    const account = await createAccount();
+    const SECRET = 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ';
+    await addItem(account, {
+      site: '127.0.0.1',
+      username: 'mfa-user',
+      password: 'pw',
+      totp: SECRET,
+    });
+    const { context, extensionId } = await launch(userDataDir);
+    try {
+      const popup = await openPopup(context, extensionId);
+      await unlockInPopup(popup, account);
+      const page = await context.newPage();
+      await page.goto(`http://127.0.0.1:${sitePort}${path}`);
+      await expectPrompt(page, /Fill two-factor code\?.*mfa-user/);
+      await clickPromptButton(page, 'Fill code');
+      const boxes = page.locator('.otp input');
+      await expect
+        .poll(async () =>
+          (
+            await boxes.evaluateAll((inputs) => inputs.map((i) => (i as HTMLInputElement).value))
+          ).join(''),
+        )
+        .toBe(totp(SECRET));
+    } finally {
+      await context.close();
+    }
+  });
+}

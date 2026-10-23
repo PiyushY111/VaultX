@@ -67,14 +67,23 @@ describe('manifest', async () => {
 
   it('requests only the permissions it uses', () => {
     // offscreen + clipboardWrite: clearing a copied password (background/clipboard.ts).
-    // Neither shows an install warning; clipboardRead (which would) is not requested.
+    // contextMenus: the right-click menu (background/commands.ts).
+    // None shows an install warning; clipboardRead (which would) is not requested.
     expect(manifest.permissions.sort()).toEqual([
       'alarms',
       'clipboardWrite',
+      'contextMenus',
       'idle',
       'offscreen',
       'storage',
     ]);
+  });
+
+  it('suggests the fill shortcut, which users can change in chrome://extensions/shortcuts', () => {
+    expect(manifest.commands['fill-login'].suggested_key).toEqual({
+      default: 'Ctrl+Shift+L',
+      mac: 'Command+Shift+L',
+    });
   });
 
   it('allows WebAssembly but never eval or remote scripts', () => {
