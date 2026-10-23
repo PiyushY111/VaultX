@@ -4,10 +4,19 @@ import { AUTO_LOCK_OPTIONS_MINUTES } from '../lib/autoLockSetting';
 import {
   emptyItem,
   filterItems,
+  isTrashed,
+  normalizeFolder,
   withPasswordHistory,
   type VaultItem,
   type VaultItemData,
 } from '../vault/items';
+import {
+  buildFolderTree,
+  folderPaths,
+  moveFolder,
+  parentFolder,
+  withFolder,
+} from '../vault/folders';
 import { createRevisionLedger } from '../vault/revisionLedger';
 import type { VaultSession } from '../vault/session';
 import {
@@ -21,13 +30,16 @@ import {
 import { formatCheckpoint, vaultCheckpoint } from '@password-manager/crypto';
 import { BaselinePrompt } from './BaselinePrompt';
 import { EmergencyKit } from './EmergencyKit';
+import { FolderTree } from './FolderTree';
 import { HealthPanel } from './HealthPanel';
 import { Emblem, KeyholeIcon } from './Emblem';
 import { ItemForm } from './ItemForm';
 import { ItemRow } from './ItemRow';
+import { MoveToFolderBar } from './MoveToFolderBar';
 import { PasswordGenerator } from './PasswordGenerator';
 import { SecurityPanel } from './SecurityPanel';
 import { TransferPanel } from './TransferPanel';
+import { TrashView } from './TrashView';
 
 interface Props {
   session: VaultSession;
@@ -45,9 +57,13 @@ interface Props {
 type Editing = { mode: 'new' } | { mode: 'edit'; item: VaultItem; from?: View } | null;
 
 /** The screen shown instead of the item list. */
-type View = 'vault' | 'security' | 'transfer' | 'health';
+type View = 'vault' | 'security' | 'transfer' | 'health' | 'trash';
 
 const SESSION_EXPIRED = 'Your session expired. Enter your master password to continue.';
+const CHANGED_ELSEWHERE = 'Your vault was changed elsewhere, so it has been reloaded. Try again.';
+
+/** How long "Moved to trash · Undo" stays up. */
+const UNDO_MS = 8000;
 
 const NO_WARNINGS: VaultWarnings = {
   failedIds: [],
@@ -87,11 +103,17 @@ export function VaultView({
   const [query, setQuery] = useState('');
   const [tag, setTag] = useState<string | null>(null);
   const [favoritesOnly, setFavoritesOnly] = useState(false);
+  /** null for all items, '' for items in no folder, or a folder's path. */
+  const [folder, setFolder] = useState<string | null>(null);
+  /** Ids picked to move to a folder, while selecting (null otherwise). */
+  const [selecting, setSelecting] = useState<ReadonlySet<string> | null>(null);
   const [editing, setEditing] = useState<Editing>(null);
   const [showGenerator, setShowGenerator] = useState(false);
   const [view, setView] = useState<View>('vault');
   const [showKit, setShowKit] = useState(justSignedUp);
   const [error, setError] = useState<string | null>(null);
+  /** The item just moved to the trash, while its Undo is offered. */
+  const [justTrashed, setJustTrashed] = useState<VaultItem | null>(null);
   const ledger = useMemo(() => createRevisionLedger(session.email), [session.email]);
   const sync = useRef<VaultSync | null>(null);
   sync.current ??= new VaultSync(session, ledger);
@@ -148,19 +170,30 @@ export function VaultView({
     // Load once per session; handleError only reads props that change with it.
   }, [load]);
 
+  useEffect(() => {
+    if (!justTrashed) return;
+    const timer = setTimeout(() => setJustTrashed(null), UNDO_MS);
+    return () => clearTimeout(timer);
+  }, [justTrashed]);
+
   // Search runs over the decrypted items in memory; the query never leaves the browser.
+  // filterItems leaves out the trash, so it's only ever listed in its own view.
   const visible = useMemo(
-    () => filterItems(items ?? [], query, { tag, favoritesOnly }),
-    [items, query, tag, favoritesOnly],
+    () => filterItems(items ?? [], query, { tag, favoritesOnly, folder }),
+    [items, query, tag, favoritesOnly, folder],
   );
+  const live = useMemo(() => (items ?? []).filter((item) => !isTrashed(item)), [items]);
+  const trashed = useMemo(() => (items ?? []).filter(isTrashed), [items]);
+  const folderTree = useMemo(() => buildFolderTree(live), [live]);
+  const allFolders = useMemo(() => folderPaths(folderTree), [folderTree]);
   const allTags = useMemo(() => {
     const seen = new Map<string, string>();
-    for (const item of items ?? [])
+    for (const item of live)
       for (const t of item.tags ?? []) if (!seen.has(t.toLowerCase())) seen.set(t.toLowerCase(), t);
     return [...seen.values()].sort((a, b) =>
       a.localeCompare(b, undefined, { sensitivity: 'base' }),
     );
-  }, [items]);
+  }, [live]);
 
   function closeEditor() {
     if (editing?.mode === 'edit' && editing.from) setView(editing.from);
@@ -194,36 +227,108 @@ export function VaultView({
     }
   }
 
+  /** For writes made from a button: a vault changed elsewhere is reloaded first. */
+  async function handleWriteError(err: unknown) {
+    if (err instanceof VaultChangedError || isStaleRevision(err)) {
+      await load().catch(handleError);
+      setError(CHANGED_ELSEWHERE);
+    } else {
+      handleError(err);
+    }
+  }
+
+  const replaceItem = (saved: VaultItem) =>
+    setItems((prev) => (prev ?? []).map((other) => (other.id === saved.id ? saved : other)));
+  const dropItems = (ids: readonly string[]) =>
+    setItems((prev) => (prev ?? []).filter((other) => !ids.includes(other.id)));
+
   async function toggleFavorite(item: VaultItem) {
     try {
-      const saved = await sync.current!.update(item, { ...item, favorite: !item.favorite });
-      setItems((prev) => (prev ?? []).map((other) => (other.id === saved.id ? saved : other)));
+      replaceItem(await sync.current!.update(item, { ...item, favorite: !item.favorite }));
     } catch (err) {
-      if (err instanceof VaultChangedError) {
-        await load().catch(handleError);
-        setError('Your vault was changed elsewhere, so it has been reloaded. Try again.');
-      } else {
-        handleError(err);
-      }
+      await handleWriteError(err);
     }
   }
 
-  async function remove(item: VaultItem) {
-    if (!window.confirm(`Delete ${item.site}?`)) return;
+  // No "are you sure?": it's undoable, from the notice and from the trash.
+  async function moveToTrash(item: VaultItem) {
     try {
-      await sync.current!.remove(item.id);
-      setItems((prev) => (prev ?? []).filter((other) => other.id !== item.id));
+      const saved = await sync.current!.trash(item);
+      replaceItem(saved);
+      setJustTrashed(saved);
     } catch (err) {
-      if (err instanceof VaultChangedError) {
-        await load().catch(handleError);
-        setError('Your vault was changed elsewhere, so it has been reloaded. Try again.');
-      } else {
-        handleError(err);
-      }
+      await handleWriteError(err);
     }
   }
 
-  const count = items?.length ? `${items.length} ${items.length === 1 ? 'item' : 'items'}` : null;
+  async function restore(item: VaultItem) {
+    setJustTrashed(null);
+    try {
+      replaceItem(await sync.current!.restore(item));
+    } catch (err) {
+      await handleWriteError(err);
+    }
+  }
+
+  /** For batch writes: also reloads if one stopped partway, as some batches went through. */
+  async function handleBatchError(err: unknown) {
+    await handleWriteError(err);
+    const partial = err instanceof Error && !(err instanceof ApiError) && err.cause;
+    if (partial && !(err instanceof VaultChangedError)) await load().catch(handleError);
+  }
+
+  async function deleteForever(ids: string[]) {
+    try {
+      await sync.current!.removeMany(ids);
+      dropItems(ids);
+    } catch (err) {
+      await handleBatchError(err);
+    }
+  }
+
+  /** Saves folder changes, in as few requests as the batch size allows. True if all saved. */
+  async function saveFolderChanges(
+    changes: { item: VaultItem; data: VaultItemData }[],
+  ): Promise<boolean> {
+    try {
+      const saved = new Map((await sync.current!.updateMany(changes)).map((it) => [it.id, it]));
+      setItems((prev) => (prev ?? []).map((other) => saved.get(other.id) ?? other));
+      return true;
+    } catch (err) {
+      await handleBatchError(err);
+      return false;
+    }
+  }
+
+  // Folder changes cover the trash too, so a restored item comes back to the renamed folder.
+  async function renameFolder(from: string, to: string) {
+    const target = normalizeFolder(to); // Throws for a path too deep or too long.
+    if (!target) throw new Error('Enter a folder name.');
+    if (await saveFolderChanges(moveFolder(items ?? [], from, target))) setFolder(target);
+  }
+
+  async function deleteFolder(path: string) {
+    const parent = parentFolder(path);
+    if (await saveFolderChanges(moveFolder(items ?? [], path, parent))) setFolder(parent ?? null);
+  }
+
+  async function moveSelected(target: string) {
+    const changes = (items ?? [])
+      .filter((item) => selecting?.has(item.id))
+      .map((item) => ({ item, data: withFolder(item, target) }))
+      .filter(({ item, data }) => data.folder !== item.folder);
+    if (await saveFolderChanges(changes)) setSelecting(null);
+  }
+
+  const toggleSelected = (id: string, on: boolean) =>
+    setSelecting((prev) => {
+      const next = new Set(prev);
+      if (on) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+
+  const count = live.length ? `${live.length} ${live.length === 1 ? 'item' : 'items'}` : null;
 
   return (
     <div className="vault">
@@ -299,7 +404,7 @@ export function VaultView({
 
         {view === 'health' ? (
           <HealthPanel
-            items={items}
+            items={items && live}
             onEdit={(item) => {
               setView('vault');
               setEditing({ mode: 'edit', item, from: 'health' });
@@ -322,6 +427,15 @@ export function VaultView({
               }
             }}
             onSessionExpired={() => onLock(SESSION_EXPIRED)}
+            onClose={() => setView('vault')}
+          />
+        ) : view === 'trash' ? (
+          <TrashView
+            items={trashed}
+            now={new Date()}
+            onRestore={restore}
+            onDeleteForever={(item) => deleteForever([item.id])}
+            onEmpty={() => deleteForever(trashed.map((item) => item.id))}
             onClose={() => setView('vault')}
           />
         ) : view === 'security' ? (
@@ -354,10 +468,13 @@ export function VaultView({
         ) : editing ? (
           <ItemForm
             key={editing.mode === 'edit' ? editing.item.id : 'new'}
-            initial={editing.mode === 'edit' ? editing.item : emptyItem()}
+            initial={
+              editing.mode === 'edit' ? editing.item : withFolder(emptyItem(), folder || undefined) // A new item starts in the folder being viewed.
+            }
             isNew={editing.mode === 'new'}
             onSave={save}
             onCancel={closeEditor}
+            folders={allFolders}
           />
         ) : (
           <>
@@ -404,9 +521,55 @@ export function VaultView({
               >
                 {showGenerator ? 'Hide generator' : 'Password generator'}
               </button>
+              {live.length > 0 && (
+                <button
+                  type="button"
+                  className="btn btn-quiet"
+                  aria-pressed={selecting !== null}
+                  onClick={() => setSelecting((prev) => (prev ? null : new Set()))}
+                >
+                  {selecting ? 'Done selecting' : 'Select'}
+                </button>
+              )}
+              {trashed.length > 0 && (
+                <button type="button" className="btn btn-quiet" onClick={() => setView('trash')}>
+                  Trash ({trashed.length})
+                </button>
+              )}
             </div>
+            {justTrashed && (
+              <p className="notice row" role="status">
+                Moved {justTrashed.site} to the trash.
+                <button
+                  type="button"
+                  className="btn btn-quiet"
+                  onClick={() => void restore(justTrashed)}
+                >
+                  Undo
+                </button>
+              </p>
+            )}
             {showGenerator && <PasswordGenerator />}
-            {(allTags.length > 0 || (items?.some((item) => item.favorite) ?? false)) && (
+            {selecting && (
+              <MoveToFolderBar
+                count={selecting.size}
+                folders={allFolders}
+                onMove={moveSelected}
+                onCancel={() => setSelecting(null)}
+              />
+            )}
+            {folderTree.length > 0 && (
+              <FolderTree
+                tree={folderTree}
+                total={live.length}
+                looseCount={live.filter((item) => !item.folder).length}
+                selected={folder}
+                onSelect={setFolder}
+                onRename={renameFolder}
+                onDelete={(path) => void deleteFolder(path)}
+              />
+            )}
+            {(allTags.length > 0 || live.some((item) => item.favorite)) && (
               <div className="chips" role="group" aria-label="Filter by tag">
                 <button
                   type="button"
@@ -433,7 +596,7 @@ export function VaultView({
               <p className="quiet-state">Decrypting vault…</p>
             ) : visible.length === 0 ? (
               <div className="quiet-state">
-                {items.length === 0 ? (
+                {live.length === 0 ? (
                   <>
                     <p>Your vault is empty.</p>
                     <p className="hint">
@@ -451,8 +614,12 @@ export function VaultView({
                     key={item.id}
                     item={item}
                     onEdit={() => setEditing({ mode: 'edit', item })}
-                    onDelete={() => remove(item)}
+                    onTrash={() => moveToTrash(item)}
                     onToggleFavorite={() => toggleFavorite(item)}
+                    {...(selecting && {
+                      selected: selecting.has(item.id),
+                      onSelectedChange: (on: boolean) => toggleSelected(item.id, on),
+                    })}
                   />
                 ))}
               </ul>

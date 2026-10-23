@@ -6,8 +6,11 @@ import { isLogin, type VaultItem } from '../vault/items';
 interface Props {
   item: VaultItem;
   onEdit: () => void;
-  onDelete: () => void;
+  onTrash: () => void;
   onToggleFavorite: () => void;
+  /** While selecting items to move: whether this one is selected, and how to change it. */
+  selected?: boolean;
+  onSelectedChange?: (selected: boolean) => void;
 }
 
 /** First letter of the item's name, shown in a small crest. */
@@ -24,7 +27,14 @@ const maskCard = (number: string) => {
   return digits.length > 4 ? `•••• •••• •••• ${digits.slice(-4)}` : '••••';
 };
 
-export function ItemRow({ item, onEdit, onDelete, onToggleFavorite }: Props) {
+export function ItemRow({
+  item,
+  onEdit,
+  onTrash,
+  onToggleFavorite,
+  selected = false,
+  onSelectedChange,
+}: Props) {
   const [revealed, setRevealed] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
   const login = isLogin(item);
@@ -49,6 +59,15 @@ export function ItemRow({ item, onEdit, onDelete, onToggleFavorite }: Props) {
 
   return (
     <li className="entry" aria-label={item.site} data-type={item.type ?? 'login'}>
+      {onSelectedChange && (
+        <input
+          type="checkbox"
+          className="entry-select"
+          aria-label={`Select ${item.site}`}
+          checked={selected}
+          onChange={(e) => onSelectedChange(e.target.checked)}
+        />
+      )}
       <span className="initial" aria-hidden="true">
         {crestLetter(item.site)}
       </span>
@@ -106,6 +125,7 @@ export function ItemRow({ item, onEdit, onDelete, onToggleFavorite }: Props) {
           </>
         )}
         {item.notes && <p className="entry-notes">{item.notes}</p>}
+        {item.folder && <span className="entry-user">In {item.folder.replaceAll('/', ' › ')}</span>}
         {item.tags && item.tags.length > 0 && (
           <ul className="entry-tags" aria-label="Tags">
             {item.tags.map((tag) => (
@@ -153,8 +173,8 @@ export function ItemRow({ item, onEdit, onDelete, onToggleFavorite }: Props) {
         <button type="button" className="btn btn-quiet" onClick={onEdit}>
           Edit
         </button>
-        <button type="button" className="btn btn-quiet btn-danger" onClick={onDelete}>
-          Delete
+        <button type="button" className="btn btn-quiet btn-danger" onClick={onTrash}>
+          Move to trash
         </button>
       </div>
     </li>

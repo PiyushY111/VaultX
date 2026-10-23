@@ -9,7 +9,7 @@ import {
 } from '../lib/passwordStrength';
 import { createBackup, isBackupFile, readBackup } from '../vault/backup';
 import { parseImport, withoutDuplicates, type ImportSource } from '../vault/importers';
-import type { VaultItem, VaultItemData } from '../vault/items';
+import { isTrashed, type VaultItem, type VaultItemData } from '../vault/items';
 import { proveCurrentPassword, type VaultSession } from '../vault/session';
 import { StrengthMeter } from './StrengthMeter';
 
@@ -246,12 +246,14 @@ function ImportSection({ items, importItems, onSessionExpired }: Props) {
 function ExportSection({ session, items, unverifiedCount, onSessionExpired }: Props) {
   const [master, setMaster] = useState('');
   const [separate, setSeparate] = useState(false);
+  const [includeTrash, setIncludeTrash] = useState(false);
   const [backupPassword, setBackupPassword] = useState('');
   const [confirm, setConfirm] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState(false);
   const strength = usePasswordStrength(separate ? backupPassword : '', [session.email]);
+  const trashedCount = items?.filter(isTrashed).length ?? 0;
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
@@ -280,7 +282,8 @@ function ExportSection({ session, items, unverifiedCount, onSessionExpired }: Pr
     try {
       // Only the account's owner can take everything out in one file.
       await proveCurrentPassword(session, masterPassword);
-      const file = await createBackup(items, filePassword);
+      const exported = includeTrash ? items : items.filter((item) => !isTrashed(item));
+      const file = await createBackup(exported, filePassword);
       const date = new Date().toISOString().slice(0, 10);
       downloadText(`vaultx-backup-${date}.json`, file, 'application/json');
       setDone(true);
@@ -315,6 +318,16 @@ function ExportSection({ session, items, unverifiedCount, onSessionExpired }: Pr
           onChange={(e) => setMaster(e.target.value)}
         />
       </label>
+      {trashedCount > 0 && (
+        <label className="inline">
+          <input
+            type="checkbox"
+            checked={includeTrash}
+            onChange={(e) => setIncludeTrash(e.target.checked)}
+          />
+          Include {trashedCount} item{trashedCount === 1 ? '' : 's'} in the trash
+        </label>
+      )}
       <label className="inline">
         <input type="checkbox" checked={separate} onChange={(e) => setSeparate(e.target.checked)} />
         Protect the backup with a different password

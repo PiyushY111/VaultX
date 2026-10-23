@@ -232,11 +232,18 @@ export const api = {
       token,
       body: { ...item, manifest },
     }),
+  updateItems: (token: string, items: ItemRevisionPayload[], manifest: ManifestPayload) =>
+    request<{ items: ItemResponse[] }>('PUT', '/vault-items/batch', {
+      token,
+      body: { items, manifest },
+    }),
   deleteItem: (token: string, id: string, manifest: ManifestPayload) =>
     request<void>('DELETE', `/vault-items/${encodeURIComponent(id)}`, {
       token,
       body: { manifest },
     }),
+  deleteItems: (token: string, ids: string[], manifest: ManifestPayload) =>
+    request<void>('POST', '/vault-items/batch-delete', { token, body: { ids, manifest } }),
   putManifest: (token: string, manifest: ManifestPayload) =>
     request<void>('PUT', '/vault-manifest', { token, body: manifest }),
   getAccount: (token: string) => request<AccountInfo>('GET', '/account', { token }),

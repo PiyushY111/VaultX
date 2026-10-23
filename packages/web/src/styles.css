@@ -1111,6 +1111,86 @@ button.link:hover {
   margin: 0 0 0.75rem;
 }
 
+/* Folders: a compact tree above the list, filtering it like the tag chips. */
+.folders {
+  margin: 0 0 0.75rem;
+  font-size: var(--step--1);
+}
+
+.folders ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.folders ul ul {
+  padding-left: 1.1rem;
+  border-left: 1px solid var(--indigo-line);
+  margin-left: 0.55rem;
+}
+
+.folders li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.folders li > ul {
+  flex-basis: 100%;
+}
+
+.folder-toggle {
+  width: 1.1rem;
+  padding: 0;
+  font: inherit;
+  color: var(--ash);
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+
+span.folder-toggle {
+  cursor: default;
+}
+
+.folder-button {
+  padding: 0.15rem 0.45rem;
+  font: inherit;
+  color: var(--silk);
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+
+.folder-button:hover {
+  border-color: var(--indigo-line);
+}
+
+.folder-button[aria-pressed='true'] {
+  color: var(--ink);
+  background: var(--gold);
+  border-color: var(--gold);
+}
+
+.folder-count {
+  margin-left: 0.3rem;
+  color: var(--ash);
+}
+
+.folder-button[aria-pressed='true'] .folder-count {
+  color: inherit;
+}
+
+.folders .row {
+  margin-top: 0.4rem;
+}
+
+.entry-select {
+  align-self: center;
+  margin-right: 0.6rem;
+}
+
 .star {
   font-size: var(--step-1);
   line-height: 1;

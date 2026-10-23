@@ -35,6 +35,12 @@ the app and API share an origin and no CORS is needed. In production, serve
 - **Strength meter:** zxcvbn (loaded on demand, runs locally) rates passwords
   as you type. Master passwords must score at least "Strong"; item passwords
   get advice only.
+- **Password generator:** random characters, or passphrases of words from
+  EFF's large word list (`src/lib/wordlist/`, CC BY 3.0 US; regenerate it
+  with `scripts/build-wordlist.mjs`). The list loads as its own chunk the
+  first time it's needed. Signup can suggest a six-word passphrase for the
+  master password; it's shown so it can be written down, and has to be typed
+  again to confirm.
 - **Copied passwords** are cleared from the clipboard after 30 seconds.
 - **Security page:** change the master password (rotates the vault key and
   re-encrypts every item), list sessions, and sign out one or all of them.
@@ -69,6 +75,14 @@ the app and API share an origin and no CORS is needed. In production, serve
   encrypted format (`src/vault/items.ts`), with tags, favorites (sorted
   first, filterable by chips) and, for logins, a password history kept inside
   the item and shown in the edit form.
+- **Folders** (`src/vault/folders.ts`, `src/components/FolderTree.tsx`,
+  `MoveToFolderBar.tsx`): a tree above the list filters it; rename and delete
+  a folder, or select items and move them, in one batch save. Bitwarden CSV
+  imports keep their folders.
+- **Trash** (`src/components/TrashView.tsx`, `trash`/`restore` in
+  `src/vault/sync.ts`): "Move to trash" is an ordinary save with `deletedAt`
+  set, undoable from the notice that follows or from the trash. On load, items
+  trashed 30+ days ago are deleted in one `POST /vault-items/batch-delete`.
 - **Breach check** (`src/lib/breachCheck.ts`): opt-in from the health page,
   Have I Been Pwned's k-anonymity range API; only hash prefixes are sent.
 - **Password health** (`src/lib/passwordHealth.ts`): flags weak passwords

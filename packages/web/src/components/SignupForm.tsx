@@ -1,10 +1,12 @@
 import { useState, type FormEvent } from 'react';
+import { DEFAULT_PASSPHRASE_OPTIONS, generatePassphrase } from '../lib/passwordGenerator';
 import {
   MIN_MASTER_PASSWORD_SCORE,
   WEAK_MASTER_PASSWORD,
   estimateStrength,
   usePasswordStrength,
 } from '../lib/passwordStrength';
+import { loadWordlist } from '../lib/wordlist';
 import { MIN_MASTER_PASSWORD_LENGTH, signUp, type VaultSession } from '../vault/session';
 import { StrengthMeter } from './StrengthMeter';
 
@@ -17,10 +19,25 @@ export function SignupForm({ onSignedUp, onSwitchToLogin }: Props) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
+  // Shown in plain text after "Suggest a passphrase", so it can be written down.
+  const [revealed, setRevealed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const strength = usePasswordStrength(password, [email]);
   const tooWeak = strength !== null && strength.score < MIN_MASTER_PASSWORD_SCORE;
+
+  async function suggestPassphrase() {
+    try {
+      setPassword(generatePassphrase(DEFAULT_PASSPHRASE_OPTIONS, await loadWordlist()));
+    } catch {
+      setError('Couldn’t load the word list for passphrases. Try again.');
+      return;
+    }
+    // Typed by hand, as a check that it can be reproduced from what was written down.
+    setConfirm('');
+    setRevealed(true);
+    setError(null);
+  }
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
@@ -39,6 +56,7 @@ export function SignupForm({ onSignedUp, onSwitchToLogin }: Props) {
       return;
     }
     const submittedPassword = password;
+    setRevealed(false);
     setPassword('');
     setConfirm('');
     setBusy(true);
@@ -71,14 +89,31 @@ export function SignupForm({ onSignedUp, onSwitchToLogin }: Props) {
       <label>
         Master password
         <input
-          type="password"
+          type={revealed ? 'text' : 'password'}
           autoComplete="new-password"
+          spellCheck={false}
           required
           minLength={MIN_MASTER_PASSWORD_LENGTH}
           value={password}
           onChange={(e) => setPassword(e.target.value)}
         />
       </label>
+      <div className="row">
+        <button type="button" className="btn btn-quiet" onClick={() => void suggestPassphrase()}>
+          {revealed ? 'Suggest another' : 'Suggest a passphrase'}
+        </button>
+        {revealed && (
+          <button type="button" className="btn btn-quiet" onClick={() => setRevealed(false)}>
+            Hide
+          </button>
+        )}
+      </div>
+      {revealed && (
+        <p className="hint" role="status">
+          Write this passphrase down or memorize it, then type it again below. It can’t be recovered
+          if you lose it.
+        </p>
+      )}
       <StrengthMeter strength={strength} requirement={tooWeak ? WEAK_MASTER_PASSWORD : undefined} />
       <label>
         Confirm master password

@@ -1,17 +1,21 @@
-import { useId, useState, type FormEvent } from 'react';
+import { useEffect, useId, useState, type FormEvent } from 'react';
 import { copySecret } from '../lib/clipboard';
 import { usePasswordStrength } from '../lib/passwordStrength';
+import { publicSuffixSite } from '../lib/publicSuffix';
 import { groupDigits, readTotp, useTotp } from '../lib/useTotp';
 import {
   CARD_FIELDS,
   IDENTITY_FIELDS,
   ITEM_TYPES,
+  MATCH_MODES,
   emptyItem,
   isLogin,
   normalizeTags,
   type ItemType,
+  type MatchMode,
   type VaultItemData,
 } from '../vault/items';
+import { withFolder } from '../vault/folders';
 import { PasswordGenerator } from './PasswordGenerator';
 import { StrengthMeter } from './StrengthMeter';
 
@@ -20,6 +24,8 @@ interface Props {
   isNew: boolean;
   onSave: (data: VaultItemData) => Promise<void>;
   onCancel: () => void;
+  /** Folders already in the vault, suggested as you type. */
+  folders?: readonly string[];
 }
 
 const TYPE_LABELS: Record<ItemType, string> = {
@@ -29,14 +35,34 @@ const TYPE_LABELS: Record<ItemType, string> = {
   identity: 'Identity',
 };
 
+const MATCH_LABELS: Record<MatchMode, string> = {
+  host: 'This site and its subdomains (default)',
+  domain: 'Anywhere on the site’s domain',
+  exact: 'This exact address only',
+  never: 'Never fill it on a page',
+};
+
+const MATCH_HINTS: Record<MatchMode, string> = {
+  host: 'Saved for login.example.com, it’s filled there and on a.login.example.com.',
+  domain:
+    'Saved for login.example.com, it’s also filled on example.com and shop.example.com. Use it only if you trust every part of the site.',
+  exact: 'Saved for login.example.com, it’s filled there only, not on its subdomains.',
+  never: 'The extension won’t offer it on any page; copy it from the popup instead.',
+};
+
+/** How long to wait after typing in the site before checking it against the suffix list. */
+const SUFFIX_CHECK_DELAY_MS = 300;
+
 const formatDate = (iso: string) =>
   new Date(iso).toLocaleDateString(undefined, { dateStyle: 'medium' });
 
-export function ItemForm({ initial, isNew, onSave, onCancel }: Props) {
+export function ItemForm({ initial, isNew, onSave, onCancel, folders = [] }: Props) {
   const passwordId = useId();
   const totpId = useId();
+  const foldersId = useId();
   const [data, setData] = useState(initial);
   const [tagsText, setTagsText] = useState((initial.tags ?? []).join(', '));
+  const [folderText, setFolderText] = useState(initial.folder ?? '');
   const [showPassword, setShowPassword] = useState(false);
   const [showSecrets, setShowSecrets] = useState(false);
   const [showGenerator, setShowGenerator] = useState(false);
@@ -47,6 +73,24 @@ export function ItemForm({ initial, isNew, onSave, onCancel }: Props) {
   const login = isLogin(data);
   // Advice only: a site may force a weak password on you.
   const strength = usePasswordStrength(login ? data.password : '', [data.site, data.username]);
+  const [suffixSite, setSuffixSite] = useState<string | null>(null);
+  const match: MatchMode = data.match ?? 'host';
+
+  // A login saved for a public suffix (co.uk) would never be filled: say so while typing.
+  useEffect(() => {
+    let active = true;
+    const timer = setTimeout(() => {
+      if (!login) return setSuffixSite(null);
+      publicSuffixSite(data.site).then(
+        (host) => active && setSuffixSite(host),
+        () => active && setSuffixSite(null),
+      );
+    }, SUFFIX_CHECK_DELAY_MS);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [login, data.site]);
   const totp = useTotp(login ? data.totp : undefined);
 
   const set =
@@ -70,17 +114,28 @@ export function ItemForm({ initial, isNew, onSave, onCancel }: Props) {
         return;
       }
     }
-    setBusy(true);
-    setError(null);
+    let saved: VaultItemData;
     try {
       const { totp: rawTotp, fields, ...rest } = data;
       const tags = normalizeTags(tagsText);
-      await onSave({
-        ...rest,
-        ...(login && rawTotp?.trim() && { totp: rawTotp.trim() }),
-        ...(tags.length && { tags }),
-        ...(fields && { fields }),
-      });
+      saved = withFolder(
+        {
+          ...rest,
+          ...(login && rawTotp?.trim() && { totp: rawTotp.trim() }),
+          ...(tags.length && { tags }),
+          ...(fields && { fields }),
+        },
+        folderText,
+      );
+    } catch (err) {
+      // A folder path too deep or too long.
+      setError(`Folder: ${(err as Error).message}`);
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await onSave(saved);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Save failed');
       setBusy(false);
@@ -108,6 +163,12 @@ export function ItemForm({ initial, isNew, onSave, onCancel }: Props) {
         {login ? 'Site' : 'Title'}
         <input required autoComplete="off" value={data.site} onChange={set('site')} />
       </label>
+      {suffixSite && (
+        <p className="warning" role="status">
+          VaultX won’t fill this login anywhere: “{suffixSite}” is a shared suffix, not a website.
+          Use the site’s full address, like login.example.{suffixSite}.
+        </p>
+      )}
 
       {login && (
         <>
@@ -220,6 +281,21 @@ export function ItemForm({ initial, isNew, onSave, onCancel }: Props) {
           onChange={(e) => setTagsText(e.target.value)}
         />
       </label>
+      <label>
+        Folder
+        <input
+          autoComplete="off"
+          placeholder="Work/Servers (use / for a folder inside another)"
+          list={foldersId}
+          value={folderText}
+          onChange={(e) => setFolderText(e.target.value)}
+        />
+        <datalist id={foldersId}>
+          {folders.map((path) => (
+            <option key={path} value={path} />
+          ))}
+        </datalist>
+      </label>
       <label className="inline">
         <input
           type="checkbox"
@@ -228,6 +304,25 @@ export function ItemForm({ initial, isNew, onSave, onCancel }: Props) {
         />
         Favorite (shown first in the vault)
       </label>
+      {login && (
+        <details className="advanced">
+          <summary>Advanced</summary>
+          <label>
+            Fill on
+            <select
+              value={match}
+              onChange={(e) => setData((prev) => ({ ...prev, match: e.target.value as MatchMode }))}
+            >
+              {MATCH_MODES.map((mode) => (
+                <option key={mode} value={mode}>
+                  {MATCH_LABELS[mode]}
+                </option>
+              ))}
+            </select>
+          </label>
+          <p className="hint">{MATCH_HINTS[match]}</p>
+        </details>
+      )}
 
       {login && !isNew && history.length > 0 && (
         <div className="field history" role="region" aria-label="Password history">

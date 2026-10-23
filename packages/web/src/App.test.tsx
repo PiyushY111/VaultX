@@ -194,12 +194,123 @@ describe('session expiry', () => {
     server.expireAllSessions();
 
     const row = screen.getByRole('listitem', { name: ITEM.site });
-    vi.spyOn(window, 'confirm').mockReturnValue(true);
-    await user.click(within(row).getByRole('button', { name: 'Delete' }));
+    await user.click(within(row).getByRole('button', { name: 'Move to trash' }));
     await waitFor(() =>
       expect(screen.getByRole('heading', { name: 'Vault locked' })).toBeInTheDocument(),
     );
     expect(screen.getByRole('status')).toHaveTextContent('session expired');
+  });
+});
+
+describe('trash', () => {
+  it('moves an item to the trash with Undo, restores it, and empties the trash', async () => {
+    const user = userEvent.setup();
+    await signUpAndAddItem(user);
+    const [stored] = [...server.items.values()];
+
+    // Moved to the trash: gone from the list, nothing deleted, and undoable.
+    await user.click(screen.getByRole('button', { name: 'Move to trash' }));
+    await waitFor(() =>
+      expect(screen.queryByRole('listitem', { name: ITEM.site })).not.toBeInTheDocument(),
+    );
+    expect(server.items.get(stored!.id)!.revision).toBe(2);
+    await user.click(screen.getByRole('button', { name: 'Undo' }));
+    expect(await screen.findByRole('listitem', { name: ITEM.site })).toBeInTheDocument();
+
+    // Trashed again, then restored from the trash view.
+    await user.click(screen.getByRole('button', { name: 'Move to trash' }));
+    await user.click(await screen.findByRole('button', { name: 'Trash (1)' }));
+    const trash = screen.getByRole('region', { name: 'Trash' });
+    const row = within(trash).getByRole('listitem', { name: ITEM.site });
+    expect(row).toHaveTextContent(/Moved here today · deleted for good in 30 days/);
+    await user.click(within(row).getByRole('button', { name: 'Restore' }));
+    await waitFor(() => expect(within(trash).queryByRole('listitem')).not.toBeInTheDocument());
+    await user.click(screen.getByRole('button', { name: 'Back to vault' }));
+    expect(screen.getByRole('listitem', { name: ITEM.site })).toBeInTheDocument();
+
+    // Emptying the trash deletes it for good, in one request.
+    await user.click(screen.getByRole('button', { name: 'Move to trash' }));
+    await user.click(await screen.findByRole('button', { name: 'Trash (1)' }));
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    await user.click(screen.getByRole('button', { name: 'Empty trash' }));
+    await waitFor(() => expect(server.items.size).toBe(0));
+    expect(screen.getByText('The trash is empty.')).toBeInTheDocument();
+    expect(server.requests.filter((r) => r.url.endsWith('/vault-items/batch-delete'))).toHaveLength(
+      1,
+    );
+  });
+});
+
+describe('folders', () => {
+  it('files items in folders, filters by them, renames, moves and deletes folders', async () => {
+    const user = userEvent.setup();
+    await signUpAndAddItem(user); // github.com, in no folder
+    const batches = () =>
+      server.requests.filter((r) => r.method === 'PUT' && r.url.endsWith('/vault-items/batch'));
+
+    // A new item in a nested folder; a path too deep is refused in the form.
+    await user.click(screen.getByRole('button', { name: 'Add item' }));
+    const form = screen.getByRole('form', { name: 'Add item' });
+    await user.type(within(form).getByLabelText('Site'), 'aws.example.com');
+    await user.type(within(form).getByLabelText('Password'), 'aws-PW-123456');
+    await user.type(within(form).getByLabelText('Folder'), 'a/b/c/d/e/f');
+    await user.click(within(form).getByRole('button', { name: 'Save' }));
+    expect(await within(form).findByRole('alert')).toHaveTextContent(/at most 5 levels/);
+    await user.clear(within(form).getByLabelText('Folder'));
+    await user.type(within(form).getByLabelText('Folder'), ' Work / Servers ');
+    await user.click(within(form).getByRole('button', { name: 'Save' }));
+    const aws = await screen.findByRole('listitem', { name: 'aws.example.com' });
+    expect(aws).toHaveTextContent('In Work › Servers');
+
+    // The tree filters the list.
+    const folders = screen.getByRole('navigation', { name: 'Folders' });
+    await user.click(within(folders).getByRole('button', { name: /^Servers/ }));
+    expect(screen.queryByRole('listitem', { name: ITEM.site })).not.toBeInTheDocument();
+    await user.click(within(folders).getByRole('button', { name: /^No folder/ }));
+    expect(screen.getByRole('listitem', { name: ITEM.site })).toBeInTheDocument();
+    expect(screen.queryByRole('listitem', { name: 'aws.example.com' })).not.toBeInTheDocument();
+
+    // Renaming "Work" moves "Work/Servers" with it, in one request.
+    await user.click(within(folders).getByRole('button', { name: /^Work/ }));
+    await user.click(within(folders).getByRole('button', { name: 'Rename folder' }));
+    await user.clear(within(folders).getByLabelText('New folder name'));
+    await user.type(within(folders).getByLabelText('New folder name'), 'Job');
+    await user.click(within(folders).getByRole('button', { name: 'Rename' }));
+    await waitFor(() =>
+      expect(screen.getByRole('listitem', { name: 'aws.example.com' })).toHaveTextContent(
+        'In Job › Servers',
+      ),
+    );
+    expect(batches()).toHaveLength(1);
+
+    // Select an item and move it into the folder.
+    await user.click(within(folders).getByRole('button', { name: /^All items/ }));
+    await user.click(screen.getByRole('button', { name: 'Select' }));
+    await user.click(screen.getByRole('checkbox', { name: `Select ${ITEM.site}` }));
+    const bar = screen.getByRole('form', { name: 'Move to folder' });
+    await user.type(within(bar).getByLabelText('Folder to move them to'), 'Job');
+    await user.click(within(bar).getByRole('button', { name: 'Move' }));
+    await waitFor(() =>
+      expect(within(folders).getByRole('button', { name: /^Job/ })).toHaveTextContent('Job 2'),
+    );
+    expect(screen.queryByRole('form', { name: 'Move to folder' })).not.toBeInTheDocument();
+
+    // Deleting the folder keeps its items: they move up a level, its subfolder too.
+    await user.click(within(folders).getByRole('button', { name: /^Job/ }));
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    await user.click(within(folders).getByRole('button', { name: 'Delete folder' }));
+    await waitFor(() =>
+      expect(within(folders).queryByRole('button', { name: /^Job/ })).not.toBeInTheDocument(),
+    );
+    expect(within(folders).getByRole('button', { name: /^Servers/ })).toHaveTextContent(
+      'Servers 1',
+    );
+    const github = screen.getByRole('listitem', { name: ITEM.site });
+    expect(within(github).queryByText(/^In /)).not.toBeInTheDocument();
+    expect(screen.getByRole('listitem', { name: 'aws.example.com' })).toHaveTextContent(
+      'In Servers',
+    );
+    expect(batches()).toHaveLength(3);
   });
 });
 
@@ -220,6 +331,37 @@ describe('master password strength', () => {
     await user.click(screen.getByRole('button', { name: 'Create account' }));
     expect(await screen.findByRole('alert')).toHaveTextContent(/rated at least “Strong”/);
     expect(server.requests).toHaveLength(0);
+  });
+
+  it('suggests a passphrase that has to be typed again, then unlocks the vault', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole('button', { name: 'Create an account' }));
+    await user.type(screen.getByLabelText('Email'), EMAIL);
+    await user.type(screen.getByLabelText('Confirm master password'), 'typed-before');
+    await user.click(screen.getByRole('button', { name: 'Suggest a passphrase' }));
+
+    // Shown in plain text to be written down; the confirmation is left to the user.
+    const field = screen.getByLabelText<HTMLInputElement>('Master password');
+    await waitFor(() => expect(field.value.split('-')).toHaveLength(6));
+    expect(field).toHaveAttribute('type', 'text');
+    expect(screen.getByRole('status')).toHaveTextContent(/Write this passphrase down/);
+    expect(screen.getByLabelText('Confirm master password')).toHaveValue('');
+    const passphrase = field.value;
+
+    await user.type(screen.getByLabelText('Confirm master password'), `${passphrase}x`);
+    await user.click(screen.getByRole('button', { name: 'Create account' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Passwords do not match.');
+    expect(server.requests).toHaveLength(0);
+
+    await user.clear(screen.getByLabelText('Confirm master password'));
+    await user.type(screen.getByLabelText('Confirm master password'), passphrase);
+    await user.click(screen.getByRole('button', { name: 'Create account' }));
+    await screen.findByText(/Signed in as/, {}, { timeout: 10_000 });
+
+    await user.click(screen.getByRole('button', { name: 'Lock now' }));
+    await unlock(user, passphrase);
+    await screen.findByText(/Signed in as/, {}, { timeout: 10_000 });
   });
 });
 
