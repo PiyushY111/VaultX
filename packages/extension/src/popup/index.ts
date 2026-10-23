@@ -4,14 +4,15 @@ import {
   generatePassword,
 } from '../../../web/src/lib/passwordGenerator';
 import { emblem, keyhole } from '../shared/emblem';
+import { RequestError, copyToClipboard, h, send, type Child } from './dom';
+import { formsSection } from './forms';
+import { generatedSection } from './generated';
 import type {
   CheckpointInfo,
   CheckpointVerification,
   ItemSummary,
   PendingBaselineInfo,
   PopupItem,
-  PopupRequest,
-  Response,
   Settings,
   TotpCodeResponse,
   VaultState,
@@ -24,52 +25,6 @@ import type {
 
 const AUTO_LOCK_OPTIONS_MINUTES = [5, 15, 30, 60];
 const app = document.getElementById('app')!;
-
-class RequestError extends Error {
-  constructor(
-    message: string,
-    readonly locked: boolean,
-    /** The password was right and a two-factor code is needed next. */
-    readonly secondFactor = false,
-    /** ...and it has to be a passkey or recovery code (the extension can't use passkeys). */
-    readonly passkeyOnly = false,
-  ) {
-    super(message);
-  }
-}
-
-async function send<T>(request: PopupRequest): Promise<T> {
-  const response = (await chrome.runtime.sendMessage(request)) as Response<T>;
-  if (!response.ok) {
-    throw new RequestError(
-      response.error,
-      response.locked === true,
-      response.secondFactor === true,
-      response.passkeyOnly === true,
-    );
-  }
-  return response.data;
-}
-
-type Child = Node | string | null | undefined | false;
-
-function h<K extends keyof HTMLElementTagNameMap>(
-  tag: K,
-  props: Partial<Record<string, string | boolean | ((event: Event) => void)>> = {},
-  ...children: Child[]
-): HTMLElementTagNameMap[K] {
-  const element = document.createElement(tag);
-  for (const [key, value] of Object.entries(props)) {
-    if (typeof value === 'function')
-      element.addEventListener(key.replace(/^on/, '').toLowerCase(), value);
-    else if (typeof value === 'boolean') element.toggleAttribute(key, value);
-    else if (value !== undefined) element.setAttribute(key, value);
-  }
-  for (const child of children) {
-    if (child) element.append(typeof child === 'string' ? document.createTextNode(child) : child);
-  }
-  return element;
-}
 
 function mount(...children: Child[]): void {
   app.replaceChildren(...children.filter((child): child is Node | string => Boolean(child)));
@@ -322,6 +277,10 @@ async function renderVault(state: VaultState): Promise<void> {
   matchesSection.hidden = true;
   const baselineBox = h('section', { class: 'warnings', 'aria-label': 'Confirm this vault' });
   baselineBox.hidden = true;
+  // Replaced by the cards and identities once the active tab is known.
+  const formsSlot = h('div', {});
+  // Replaced by the tab's generated password, if there is one.
+  const generatedSlot = h('div', {});
   const addButton = h(
     'button',
     {
@@ -361,6 +320,7 @@ async function renderVault(state: VaultState): Promise<void> {
       warnings,
       baselineBox,
       status,
+      generatedSlot,
       matchesSection,
       h(
         'div',
@@ -371,6 +331,7 @@ async function renderVault(state: VaultState): Promise<void> {
       ),
       search,
       list,
+      formsSlot,
       checkpointSection(),
     ),
   );
@@ -420,7 +381,20 @@ async function renderVault(state: VaultState): Promise<void> {
   renderList();
 
   const tabId = await activeTabId();
+  formsSlot.replaceWith(
+    formsSection(tabId, status, (error) =>
+      onRequestError(error, (message) => (status.textContent = message)),
+    ),
+  );
   if (tabId !== null) {
+    generatedSlot.replaceWith(
+      generatedSection(
+        tabId,
+        status,
+        (host, password) => renderAddItem(state, host, password),
+        (error) => onRequestError(error, (message) => (status.textContent = message)),
+      ),
+    );
     try {
       const matches = await send<ItemSummary[]>({ type: 'getMatchesForTab', tabId });
       if (matches.length) {
@@ -509,17 +483,8 @@ function totpLine(
 function itemRow(item: PopupItem, status: HTMLElement): HTMLLIElement {
   const secret = h('code', { class: 'secret' }, '••••••••');
   let revealed = false;
-  const copy = async (value: string, button: HTMLButtonElement, secret = false) => {
-    try {
-      await navigator.clipboard.writeText(value);
-      // The popup usually closes before 30 seconds pass, so the background clears it.
-      if (secret) await send({ type: 'scheduleClipboardClear' });
-      button.textContent = 'Copied';
-      setTimeout(() => (button.textContent = button.dataset.label ?? 'Copy'), 1500);
-    } catch {
-      status.textContent = 'Could not copy to the clipboard';
-    }
-  };
+  const copy = (value: string, button: HTMLButtonElement, secret = false) =>
+    copyToClipboard(value, button, status, secret);
   const copyUser = h(
     'button',
     { type: 'button', class: 'btn btn-quiet', 'data-label': 'Copy user' },
@@ -571,7 +536,8 @@ function itemRow(item: PopupItem, status: HTMLElement): HTMLLIElement {
 
 // --- Add login ---------------------------------------------------------------
 
-function renderAddItem(state: VaultState, site: string): void {
+/** The add-login form; `presetPassword` comes from "Save as login" on a generated password. */
+function renderAddItem(state: VaultState, site: string, presetPassword = ''): void {
   const siteInput = h('input', { name: 'site', required: true, autocomplete: 'off' });
   siteInput.value = site;
   const username = h('input', { name: 'username', autocomplete: 'off' });
@@ -582,6 +548,7 @@ function renderAddItem(state: VaultState, site: string): void {
     class: 'secret-input',
     autocomplete: 'new-password',
   });
+  password.value = presetPassword;
   const notes = h('textarea', { name: 'notes', rows: '3' });
   const error = h('p', { class: 'error', role: 'alert' });
   const submit = h('button', { type: 'submit', class: 'btn btn-primary' }, 'Save');
@@ -825,6 +792,32 @@ function checkpointSection(): HTMLElement {
   return details;
 }
 
+/** The fill shortcut as Chrome has it bound (users can change it), with a link to change it. */
+function shortcutLine(): HTMLElement {
+  const current = h('strong', {}, '…');
+  void chrome.commands.getAll().then((commands) => {
+    const shortcut = commands.find((command) => command.name === 'fill-login')?.shortcut;
+    current.textContent = shortcut || 'not set';
+  });
+  return h(
+    'p',
+    { class: 'muted' },
+    'Fill-login shortcut: ',
+    current,
+    ' ',
+    h(
+      'button',
+      {
+        type: 'button',
+        class: 'btn btn-quiet',
+        // Extension pages may open chrome:// URLs; web pages can't.
+        onclick: () => void chrome.tabs.create({ url: 'chrome://extensions/shortcuts' }),
+      },
+      'Change',
+    ),
+  );
+}
+
 function renderSettings(state: VaultState): void {
   const serverUrl = h('input', { type: 'url', name: 'serverUrl', required: true });
   serverUrl.value = state.settings.serverUrl;
@@ -863,6 +856,7 @@ function renderSettings(state: VaultState): void {
       h('label', {}, 'Server URL', serverUrl),
       h('p', { class: 'muted' }, 'Changing the server locks the vault.'),
       h('label', {}, 'Auto-lock after inactivity', autoLock),
+      shortcutLine(),
       error,
       h(
         'div',
