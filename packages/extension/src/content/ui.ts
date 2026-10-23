@@ -15,8 +15,10 @@ export interface PromptAction {
 export interface PromptContent {
   message: string;
   detail?: string;
-  /** Optional choice between several saved logins. */
+  /** Optional choice between several saved logins (or cards, or identities). */
   choices?: { value: string; label: string }[];
+  /** Accessible name of the choice list; "Choose login" when left out. */
+  choiceLabel?: string;
   actions: PromptAction[];
 }
 
@@ -108,7 +110,7 @@ export class Prompt {
     this.selected = content.choices?.[0]?.value ?? null;
     if (content.choices && content.choices.length > 1) {
       const select = document.createElement('select');
-      select.setAttribute('aria-label', 'Choose login');
+      select.setAttribute('aria-label', content.choiceLabel ?? 'Choose login');
       for (const choice of content.choices) {
         const option = document.createElement('option');
         option.value = choice.value;
