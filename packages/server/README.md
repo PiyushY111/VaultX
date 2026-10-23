@@ -6,36 +6,38 @@ imports that package at runtime and never decrypts anything.
 
 ## Endpoints
 
-| Method | Path                                 | Auth   | Purpose                                                                     |
-| ------ | ------------------------------------ | ------ | --------------------------------------------------------------------------- |
-| POST   | `/signup`                            | —      | Store email, KDF salt/params, auth hash, wrapped vault key                  |
-| POST   | `/prelogin`                          | —      | Get KDF salt/params for an email (needed to derive the auth hash)           |
-| POST   | `/login`                             | —      | Verify auth hash (constant-time), issue a bearer session token              |
-| GET    | `/vault-key`                         | Bearer | Wrapped vault key + nonce + KDF salt/params                                 |
-| GET    | `/vault-items`                       | Bearer | All of the user's encrypted items                                           |
-| POST   | `/vault-items`                       | Bearer | Store an encrypted item (client-chosen id, revision 1)                      |
-| PUT    | `/vault-items/:id`                   | Bearer | Save the item's next revision (must use a fresh nonce)                      |
-| DELETE | `/vault-items/:id`                   | Bearer | Delete an item                                                              |
-| POST   | `/logout`                            | Bearer | End this session                                                            |
-| GET    | `/sessions`                          | Bearer | The account's live sessions (client, user agent, last used)                 |
-| DELETE | `/sessions/:id`                      | Bearer | End one session                                                             |
-| DELETE | `/sessions`                          | Bearer | Sign out everywhere (every session, including this one)                     |
-| POST   | `/account/password`                  | Bearer | Change master password and rotate the vault key (see below)                 |
-| POST   | `/vault-items/batch`                 | Bearer | Create up to 500 items (an import) with one manifest change, all or nothing |
-| PUT    | `/vault-manifest`                    | Bearer | Write a vault's first manifest (see Vault manifest)                         |
-| GET    | `/account`                           | Bearer | Email, two-factor status, recovery codes left, passkey count                |
-| POST   | `/account/totp/setup`                | Bearer | Start two-factor setup: a new secret and `otpauth://` URI                   |
-| POST   | `/account/totp/enable`               | Bearer | Confirm setup with the password and a code; returns recovery codes          |
-| POST   | `/account/totp/disable`              | Bearer | Turn two-factor off (password + code)                                       |
-| POST   | `/account/totp/recovery-codes`       | Bearer | Replace the recovery codes (password + code)                                |
-| POST   | `/account/passkeys/register/options` | Bearer | Begin adding a passkey (password + existing second factor)                  |
-| POST   | `/account/passkeys`                  | Bearer | Finish adding a passkey; recovery codes if it's the first factor            |
-| GET    | `/account/passkeys`                  | Bearer | List passkeys (name, transports, created, last used)                        |
-| PATCH  | `/account/passkeys/:id`              | Bearer | Rename a passkey                                                            |
-| DELETE | `/account/passkeys/:id`              | Bearer | Remove a passkey (password + second factor)                                 |
-| POST   | `/account/passkeys/reauth-options`   | Bearer | A challenge to sign for an account change that needs a second factor        |
-| PUT    | `/account/passkeys/required`         | Bearer | "Require passkey" on/off: TOTP stops counting (password + second factor)    |
-| DELETE | `/account`                           | Bearer | Delete the account and all its data (password, and a second factor if on)   |
+| Method | Path                                 | Auth   | Purpose                                                                               |
+| ------ | ------------------------------------ | ------ | ------------------------------------------------------------------------------------- |
+| POST   | `/signup`                            | —      | Store email, KDF salt/params, auth hash, wrapped vault key                            |
+| POST   | `/prelogin`                          | —      | Get KDF salt/params for an email (needed to derive the auth hash)                     |
+| POST   | `/login`                             | —      | Verify auth hash (constant-time), issue a bearer session token                        |
+| GET    | `/vault-key`                         | Bearer | Wrapped vault key + nonce + KDF salt/params                                           |
+| GET    | `/vault-items`                       | Bearer | All of the user's encrypted items                                                     |
+| POST   | `/vault-items`                       | Bearer | Store an encrypted item (client-chosen id, revision 1)                                |
+| PUT    | `/vault-items/:id`                   | Bearer | Save the item's next revision (must use a fresh nonce)                                |
+| DELETE | `/vault-items/:id`                   | Bearer | Delete an item                                                                        |
+| POST   | `/logout`                            | Bearer | End this session                                                                      |
+| GET    | `/sessions`                          | Bearer | The account's live sessions (client, user agent, last used)                           |
+| DELETE | `/sessions/:id`                      | Bearer | End one session                                                                       |
+| DELETE | `/sessions`                          | Bearer | Sign out everywhere (every session, including this one)                               |
+| POST   | `/account/password`                  | Bearer | Change master password and rotate the vault key (see below)                           |
+| POST   | `/vault-items/batch`                 | Bearer | Create up to 500 items (an import) with one manifest change, all or nothing           |
+| PUT    | `/vault-items/batch`                 | Bearer | Save the next revision of up to 500 items, one manifest change, all or nothing        |
+| POST   | `/vault-items/batch-delete`          | Bearer | Delete up to 500 items (e.g. emptying the trash), one manifest change, all or nothing |
+| PUT    | `/vault-manifest`                    | Bearer | Write a vault's first manifest (see Vault manifest)                                   |
+| GET    | `/account`                           | Bearer | Email, two-factor status, recovery codes left, passkey count                          |
+| POST   | `/account/totp/setup`                | Bearer | Start two-factor setup: a new secret and `otpauth://` URI                             |
+| POST   | `/account/totp/enable`               | Bearer | Confirm setup with the password and a code; returns recovery codes                    |
+| POST   | `/account/totp/disable`              | Bearer | Turn two-factor off (password + code)                                                 |
+| POST   | `/account/totp/recovery-codes`       | Bearer | Replace the recovery codes (password + code)                                          |
+| POST   | `/account/passkeys/register/options` | Bearer | Begin adding a passkey (password + existing second factor)                            |
+| POST   | `/account/passkeys`                  | Bearer | Finish adding a passkey; recovery codes if it's the first factor                      |
+| GET    | `/account/passkeys`                  | Bearer | List passkeys (name, transports, created, last used)                                  |
+| PATCH  | `/account/passkeys/:id`              | Bearer | Rename a passkey                                                                      |
+| DELETE | `/account/passkeys/:id`              | Bearer | Remove a passkey (password + second factor)                                           |
+| POST   | `/account/passkeys/reauth-options`   | Bearer | A challenge to sign for an account change that needs a second factor                  |
+| PUT    | `/account/passkeys/required`         | Bearer | "Require passkey" on/off: TOTP stops counting (password + second factor)              |
+| DELETE | `/account`                           | Bearer | Delete the account and all its data (password, and a second factor if on)             |
 
 Binary fields are standard padded base64 in JSON.
 
@@ -51,7 +53,8 @@ with the old format and re-save them as revision 1.
 
 ### Vault manifest
 
-Every item write (`POST`, `PUT` and `DELETE /vault-items`) must include
+Every item write (`POST`, `PUT` and `DELETE /vault-items`, and the batch
+routes) must include
 `manifest: {version, encrypted_data, nonce}`: the client's encrypted list of
 every item id and revision, at exactly the stored version + 1. The server
 can't read it; it applies the item change and the new manifest in one

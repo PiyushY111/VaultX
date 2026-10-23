@@ -17,6 +17,7 @@ import {
   currentManifest,
   deleteItem,
   base32Decode,
+  manifestFor,
   encryptManifestBody,
   totpCode,
   createTestContext,
@@ -56,6 +57,10 @@ const item = (tag: string): PlainItem => ({
 const ALICE_ITEMS = [item('alice-bank'), item('alice-email'), item('alice-social')];
 const ALICE_ITEM_UPDATED = item('alice-bank-rotated');
 const BOB_ITEMS = [item('bob-work')];
+/** Saved, then changed or removed in batch writes (moving to the trash, emptying it). */
+const ALICE_BATCH_ITEMS = [item('alice-to-trash'), item('alice-to-purge')];
+// An odd timestamp, so finding it can only mean a leaked plaintext field.
+const ALICE_ITEM_TRASHED = { ...item('alice-trashed'), deletedAt: '2031-07-19T04:13:57.219Z' };
 
 function itemSecrets(prefix: string, plain: PlainItem): Secret[] {
   return [
@@ -202,6 +207,57 @@ describe('raw database rows never contain plaintext or key material', () => {
     expect(del.statusCode).toBe(204);
     sentItems.delete(aliceCreated[2]!.id);
 
+    // Alice moves one item to the trash and purges another, in batch writes.
+    // One at a time: each write moves the manifest to the next version.
+    const toTrash = await createItem(
+      app,
+      a.token,
+      alice.vaultKey,
+      JSON.stringify(ALICE_BATCH_ITEMS[0]),
+    );
+    const toPurge = await createItem(
+      app,
+      a.token,
+      alice.vaultKey,
+      JSON.stringify(ALICE_BATCH_ITEMS[1]),
+    );
+    const trashedJson = JSON.stringify(ALICE_ITEM_TRASHED);
+    const { revision, encrypted_data, nonce } = await updatePayload(
+      trashedJson,
+      alice.vaultKey,
+      toTrash,
+    );
+    const trashed = { revision, encrypted_data, nonce };
+    const batchPut = await app.inject({
+      method: 'PUT',
+      url: '/vault-items/batch',
+      headers: bearer(a.token),
+      payload: {
+        items: [{ id: toTrash.id, ...trashed }],
+        manifest: await manifestFor(app, a.token, alice.vaultKey, {
+          set: [{ id: toTrash.id, revision: trashed.revision }],
+        }),
+      },
+    });
+    expect(batchPut.statusCode, batchPut.body).toBe(200);
+    sentItems.set(toTrash.id, {
+      revision: trashed.revision,
+      ciphertext: trashed.encrypted_data,
+      nonce: trashed.nonce,
+      plaintext: trashedJson,
+      owner: 'alice',
+    });
+    const batchDelete = await app.inject({
+      method: 'POST',
+      url: '/vault-items/batch-delete',
+      headers: bearer(a.token),
+      payload: {
+        ids: [toPurge.id],
+        manifest: await manifestFor(app, a.token, alice.vaultKey, { remove: [toPurge.id] }),
+      },
+    });
+    expect(batchDelete.statusCode, batchDelete.body).toBe(204);
+
     // Alice turns on two-factor login; the server may keep only hashes of her recovery codes.
     const setup = await app.inject({
       method: 'POST',
@@ -275,6 +331,8 @@ describe('raw database rows never contain plaintext or key material', () => {
       ...userSecrets('bob (before password change)', bobBefore, []),
       ...ALICE_ITEMS.flatMap((plain, i) => itemSecrets(`alice item ${i}`, plain)),
       ...itemSecrets('alice updated item', ALICE_ITEM_UPDATED),
+      ...ALICE_BATCH_ITEMS.flatMap((plain, i) => itemSecrets(`alice batch item ${i}`, plain)),
+      ...itemSecrets('alice trashed item', ALICE_ITEM_TRASHED),
       ...BOB_ITEMS.flatMap((plain, i) => itemSecrets(`bob item ${i}`, plain)),
       ...recoveryCodes.flatMap((code, i) => [
         { name: `alice recovery code #${i + 1}`, value: code },
@@ -312,9 +370,10 @@ describe('raw database rows never contain plaintext or key material', () => {
     const leaks = await scanDatabaseForSecrets(ctx.pool, secrets);
     expect(leaks).toEqual([]);
     // Sanity check that the scan covered what we think it did: 3 key sets
-    // (alice, bob before and after his password change) x (5 keys/passwords) + 4 session tokens + 5 items x (JSON + 4 fields).
+    // (alice, bob before and after his password change) x (5 keys/passwords) + 4 session tokens
+    // + 8 items x (JSON + 4 fields) + the trashed item's deletedAt
     // + 10 recovery codes x 2 + 2 TOTP secrets x (raw + base32) + the manifest marker.
-    expect(secrets).toHaveLength(3 * 5 + 4 + 5 * 5 + 10 * 2 + 2 * 2 + 1);
+    expect(secrets).toHaveLength(3 * 5 + 4 + 8 * 5 + 1 + 10 * 2 + 2 * 2 + 1);
   });
 
   it('users: stores only a hash of the authHash, plus ciphertext, nonce, salt and params exactly as sent', async () => {

@@ -6,6 +6,7 @@ WORKDIR /app
 COPY package.json package-lock.json tsconfig.base.json ./
 # npm validates every workspace listed in the lockfile, so copy all manifests.
 COPY packages/crypto/package.json packages/crypto/
+COPY packages/item-format/package.json packages/item-format/
 COPY packages/server/package.json packages/server/
 COPY packages/web/package.json packages/web/
 COPY packages/extension/package.json packages/extension/
@@ -18,6 +19,7 @@ ENV NODE_ENV=production
 WORKDIR /app
 COPY package.json package-lock.json ./
 COPY packages/crypto/package.json packages/crypto/
+COPY packages/item-format/package.json packages/item-format/
 COPY packages/server/package.json packages/server/
 COPY packages/web/package.json packages/web/
 COPY packages/extension/package.json packages/extension/

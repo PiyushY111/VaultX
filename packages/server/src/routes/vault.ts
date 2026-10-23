@@ -3,7 +3,7 @@ import type pg from 'pg';
 import type { Config } from '../config.js';
 import { isUniqueViolation, withTransaction } from '../db.js';
 import { decodeBytes, encodeBytes } from '../encoding.js';
-import { conflict, notFound } from '../http-errors.js';
+import { badRequest, conflict, notFound } from '../http-errors.js';
 import {
   CHANGE_PASSWORD_BODY_LIMIT_BYTES,
   MAX_ITEM_CIPHERTEXT_BYTES,
@@ -22,10 +22,12 @@ import {
   createItemsBodySchema,
   itemListResponseSchema,
   deleteItemBodySchema,
+  deleteItemsBodySchema,
   itemIdParamsSchema,
   itemResponseSchema,
   manifestBodySchema,
   updateItemBodySchema,
+  updateItemsBodySchema,
   vaultKeyResponseSchema,
   vaultResponseSchema,
 } from '../schemas.js';
@@ -44,6 +46,11 @@ interface CreateItemBody extends CiphertextBody {
 interface UpdateItemBody extends CiphertextBody {
   revision: number;
   manifest: ManifestBody;
+}
+
+interface UpdateItemsEntry extends CiphertextBody {
+  id: string;
+  revision: number;
 }
 
 export interface ItemRow {
@@ -322,5 +329,107 @@ export function registerVaultRoutes(
       });
       return reply.code(204).send();
     },
+  );
+
+  // Many existing items at their next revisions and one manifest change, all
+  // or nothing: the same rules as PUT /vault-items/:id for every item.
+  app.put<{ Body: { items: UpdateItemsEntry[]; manifest: ManifestBody } }>(
+    '/vault-items/batch',
+    {
+      onRequest: authenticate,
+      config: batchLimit,
+      bodyLimit: CHANGE_PASSWORD_BODY_LIMIT_BYTES,
+      schema: { body: updateItemsBodySchema, response: { 200: itemListResponseSchema } },
+    },
+    async (request) => {
+      const items = request.body.items.map((item) => ({
+        id: item.id,
+        revision: item.revision,
+        ...decodeCiphertext(item),
+      }));
+      if (new Set(items.map((item) => item.id)).size !== items.length) {
+        throw badRequest('Each item may appear only once in a batch');
+      }
+      try {
+        const rows = await withTransaction(pool, async (db) => {
+          // Also rejects re-encrypting new content under an item's current nonce.
+          const { rows } = await db.query<ItemRow>(
+            `UPDATE vault_items AS v
+             SET encrypted_data = n.encrypted_data, nonce = n.nonce, revision = n.revision,
+                 updated_at = now()
+             FROM unnest($2::uuid[], $3::integer[], $4::bytea[], $5::bytea[])
+               AS n (id, revision, encrypted_data, nonce)
+             WHERE v.id = n.id AND v.user_id = $1 AND v.revision = n.revision - 1
+               AND v.nonce <> n.nonce
+             RETURNING v.id, v.revision, v.encrypted_data, v.nonce, v.created_at, v.updated_at`,
+            [
+              request.userId,
+              items.map((item) => item.id),
+              items.map((item) => item.revision),
+              items.map((item) => item.encryptedData),
+              items.map((item) => item.nonce),
+            ],
+          );
+          if (rows.length < items.length) await refuseBatchUpdate(db, request.userId, items, rows);
+          await advanceManifest(db, request.userId, request.body.manifest);
+          return rows;
+        });
+        const order = new Map(items.map((item, index) => [item.id, index]));
+        rows.sort((a, b) => order.get(a.id)! - order.get(b.id)!);
+        return { items: rows.map(toItemResponse) };
+      } catch (error) {
+        if (isUniqueViolation(error, NONCE_CONSTRAINT)) throw conflict(NONCE_REUSE_MESSAGE);
+        throw error;
+      }
+    },
+  );
+
+  // Many deletions and one manifest change, all or nothing. A POST, not a
+  // DELETE with a body, since some proxies drop the body of a DELETE.
+  app.post<{ Body: { ids: string[]; manifest: ManifestBody } }>(
+    '/vault-items/batch-delete',
+    { onRequest: authenticate, config: batchLimit, schema: { body: deleteItemsBodySchema } },
+    async (request, reply) => {
+      await withTransaction(pool, async (db) => {
+        const { rowCount } = await db.query(
+          'DELETE FROM vault_items WHERE user_id = $1 AND id = ANY($2::uuid[])',
+          [request.userId, request.body.ids],
+        );
+        // Other users' items are indistinguishable from missing ones.
+        if (rowCount !== request.body.ids.length) throw notFound();
+        await advanceManifest(db, request.userId, request.body.manifest);
+      });
+      return reply.code(204).send();
+    },
+  );
+}
+
+/**
+ * Throws the error for the first item a batch update couldn't save (404 if
+ * it isn't the user's, 409 for a stale revision or a reused nonce), which
+ * rolls the whole batch back.
+ */
+async function refuseBatchUpdate(
+  db: pg.PoolClient,
+  userId: string,
+  items: { id: string; nonce: Buffer }[],
+  saved: ItemRow[],
+): Promise<never> {
+  const savedIds = new Set(saved.map((row) => row.id));
+  const failed = items.filter((item) => !savedIds.has(item.id));
+  const { rows } = await db.query<{ id: string; revision: number; nonce: Buffer }>(
+    'SELECT id, revision, nonce FROM vault_items WHERE user_id = $1 AND id = ANY($2::uuid[])',
+    [userId, failed.map((item) => item.id)],
+  );
+  const current = new Map(rows.map((row) => [row.id, row]));
+  for (const item of failed) {
+    const existing = current.get(item.id);
+    if (!existing) throw notFound();
+    if (existing.nonce.equals(item.nonce)) throw conflict(NONCE_REUSE_MESSAGE);
+  }
+  const first = current.get(failed[0]!.id)!;
+  throw conflict(
+    'An item was changed elsewhere since it was loaded. Reload the vault and try again.',
+    { id: first.id, current_revision: first.revision },
   );
 }

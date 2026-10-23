@@ -240,6 +240,51 @@ export const deleteItemBodySchema = {
   properties: { manifest: manifestBodySchema },
 } as const;
 
+/** An existing item's id (same rule as the :id in PUT/DELETE /vault-items/:id). */
+const existingItemIdSchema = { type: 'string', format: 'uuid' } as const;
+
+/**
+ * Several existing items, each at its next revision, with the vault's next
+ * manifest (e.g. moving items to the trash, or renaming a folder). Ids must
+ * be unique; that's checked in the handler.
+ */
+export const updateItemsBodySchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['items', 'manifest'],
+  properties: {
+    items: {
+      type: 'array',
+      minItems: 1,
+      maxItems: MAX_BATCH_ITEMS,
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['id', 'revision', 'encrypted_data', 'nonce'],
+        properties: { id: existingItemIdSchema, revision: revisionSchema, ...ciphertextProperties },
+      },
+    },
+    manifest: manifestBodySchema,
+  },
+} as const;
+
+/** Several items to delete (e.g. emptying the trash), with the vault's next manifest. */
+export const deleteItemsBodySchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['ids', 'manifest'],
+  properties: {
+    ids: {
+      type: 'array',
+      minItems: 1,
+      maxItems: MAX_BATCH_ITEMS,
+      uniqueItems: true,
+      items: existingItemIdSchema,
+    },
+    manifest: manifestBodySchema,
+  },
+} as const;
+
 export const itemIdParamsSchema = {
   type: 'object',
   required: ['id'],

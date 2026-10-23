@@ -220,6 +220,8 @@ describe('authentication on protected routes', () => {
     { method: 'POST', url: '/account/password' },
     { method: 'PUT', url: '/vault-manifest' },
     { method: 'POST', url: '/vault-items/batch' },
+    { method: 'PUT', url: '/vault-items/batch' },
+    { method: 'POST', url: '/vault-items/batch-delete' },
     { method: 'GET', url: '/account' },
     { method: 'POST', url: '/account/totp/setup' },
     { method: 'POST', url: '/account/totp/enable' },
@@ -336,11 +338,14 @@ describe('vault rate limits', () => {
     }
   });
 
-  it('gives the 64 MiB batch import its own, tighter limit', async () => {
+  it.each([
+    { method: 'POST', url: '/vault-items/batch' },
+    { method: 'PUT', url: '/vault-items/batch' },
+    { method: 'POST', url: '/vault-items/batch-delete' },
+  ] as const)('gives the batch write $method $url its own, tighter limit', async (batch) => {
     const limited = await createTestContext({ vaultRateLimitMax: 100, vaultBatchRateLimitMax: 2 });
     try {
       const { token } = await registerAndLogin(limited.app, 'batch@example.com', 'pw-batch');
-      const batch = { method: 'POST', url: '/vault-items/batch' } as const;
       const statuses = [];
       for (let i = 0; i < 3; i++) statuses.push((await send(limited, batch, token)).statusCode);
       expect(statuses).toEqual([400, 400, 429]);
